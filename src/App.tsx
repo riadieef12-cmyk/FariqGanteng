@@ -4,6 +4,7 @@
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+import mqtt from 'mqtt';
 import { 
   Thermometer, 
   Droplet, 
@@ -35,8 +36,28 @@ interface LogEntry {
 }
 
 export default function App() {
-  // Connection State
-  const [isConnected, setIsConnected] = useState<boolean>(true);
+  // Helper to generate guaranteed unique IDs for logs to avoid React key collisions
+  const generateLogId = (suffix = 'log') => {
+    const rand = Math.random().toString(36).substring(2, 7);
+    return `${suffix}_${Date.now()}_${rand}`;
+  };
+
+  // MQTT Connection State Configuration
+  const [inputBrokerUrl, setInputBrokerUrl] = useState<string>('wss://broker.emqx.io:8084/mqtt');
+  const [inputPubTopic, setInputPubTopic] = useState<string>('esp32/relay/control');
+  const [inputSubTopic, setInputSubTopic] = useState<string>('esp32/relay/status');
+
+  const [brokerUrl, setBrokerUrl] = useState<string>('wss://broker.emqx.io:8084/mqtt');
+  const [pubTopic, setPubTopic] = useState<string>('esp32/relay/control');
+  const [subTopic, setSubTopic] = useState<string>('esp32/relay/status');
+
+  const [mqttClientId] = useState<string>(`web_client_${Math.random().toString(16).substring(2, 10)}`);
+  const [mqttConnected, setMqttConnected] = useState<boolean>(false);
+  const [mqttClient, setMqttClient] = useState<mqtt.MqttClient | null>(null);
+  const [isSimulatedOutage, setIsSimulatedOutage] = useState<boolean>(false);
+
+  // Map isConnected to denote whether we are connected to the actual MQTT broker (and not in simulated outage mode)
+  const isConnected = mqttConnected && !isSimulatedOutage;
   
   // Device/Hardware Configuration State
   const [deviceType, setDeviceType] = useState<'ESP32_RELAY_01' | 'ARDUINO_NANO_IOT' | 'RASPBERRY_PICO_W'>('ESP32_RELAY_01');
@@ -51,12 +72,11 @@ export default function App() {
   const [tempThreshold, setTempThreshold] = useState<number>(29.5);
   const [humidityMinThreshold, setHumidityMinThreshold] = useState<number>(45.0);
   
-  // Actuator/Control States
+  // Actuator/Control States (Lampu 1-4)
   const [relayLampu1, setRelayLampu1] = useState<boolean>(true);
   const [relayLampu2, setRelayLampu2] = useState<boolean>(false);
   const [relayLampu3, setRelayLampu3] = useState<boolean>(false);
   const [relayLampu4, setRelayLampu4] = useState<boolean>(false);
-  const [relayFan, setRelayFan] = useState<boolean>(false);
   
   // General System State
   const [uptime, setUptime] = useState<number>(45845); // Starter uptime in seconds (12h 44m 05s)
@@ -100,10 +120,8 @@ export default function App() {
     }
   }, [logs]);
 
-  // Sensor drift simulation (Real-time updates)
+  // Sensor drift simulation (Real-time updates) - Runs always to keep the visual indicators active
   useEffect(() => {
-    if (!isConnected) return;
-
     const sensorTicker = setInterval(() => {
       // Small fluctuation
       const tDrift = parseFloat(((Math.random() - 0.5) * 0.3).toFixed(1));
@@ -135,8 +153,8 @@ export default function App() {
       const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
       setLastSyncTime(timestamp);
 
-      // Randomly push SENSOR logs (35% probability or if threshold triggered)
-      const shouldLog = Math.random() < 0.35;
+      // Randomly push SENSOR logs
+      const shouldLog = Math.random() < 0.25;
       let newLogsList: LogEntry[] = [];
 
       // Check Alarms
@@ -145,7 +163,7 @@ export default function App() {
 
       if (tempAlertTriggered) {
         newLogsList.push({
-          id: Date.now().toString() + '_t_warn',
+          id: generateLogId('t_warn'),
           time: timestamp,
           type: 'ALERT',
           msg: `⚠️ SUHU TINGGI MELEBIHI AMBANG BATAS: ${nextTemp}°C (Ambang: ${tempThreshold}°C)`
@@ -154,7 +172,7 @@ export default function App() {
 
       if (humidAlertTriggered) {
         newLogsList.push({
-          id: Date.now().toString() + '_h_warn',
+          id: generateLogId('h_warn'),
           time: timestamp,
           type: 'ALERT',
           msg: `⚠️ KELEMBAPAN RENDAH: ${nextHum}% (Ambang Min: ${humidityMinThreshold}%)`
@@ -163,7 +181,7 @@ export default function App() {
 
       if (shouldLog && !tempAlertTriggered && !humidAlertTriggered) {
         newLogsList.push({
-          id: Date.now().toString(),
+          id: generateLogId('sensor'),
           time: timestamp,
           type: 'SENSOR',
           msg: `DATA_RECEIVED TEMP: ${nextTemp}°C | HUM: ${nextHum}% | RSSI: ${nextRssi}dBm`
@@ -174,10 +192,168 @@ export default function App() {
         setLogs(prev => [...prev, ...newLogsList].slice(-40)); // Keep last 40 logs
       }
 
-    }, 3500);
+    }, 4500);
 
     return () => clearInterval(sensorTicker);
-  }, [temp, humidity, isConnected, tempThreshold, humidityMinThreshold, rssi]);
+  }, [temp, humidity, tempThreshold, humidityMinThreshold, rssi]);
+
+  // Real-time MQTT Lifecycle hook
+  useEffect(() => {
+    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    
+    setLogs(prev => [
+      ...prev,
+      {
+        id: generateLogId('mqtt_init'),
+        time: timestamp,
+        type: 'SYSTEM',
+        msg: `🔌 MQTT CONNECTING: Menghubungkan ke ${brokerUrl} ...`
+      }
+    ]);
+
+    // Connect to WebSocket MQTT broker
+    const client = mqtt.connect(brokerUrl, {
+      clientId: mqttClientId,
+      clean: true,
+      connectTimeout: 5000,
+      reconnectPeriod: 4000,
+    });
+
+    setMqttClient(client);
+
+    client.on('connect', () => {
+      setMqttConnected(true);
+      const connTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('mqtt_online'),
+          time: connTime,
+          type: 'SYSTEM',
+          msg: `🟢 MQTT ONLINE: Berhasil koneksi! Subscribed ke topik "${subTopic}"`
+        }
+      ]);
+      client.subscribe(subTopic);
+    });
+
+    client.on('message', (topic, message) => {
+      const payloadString = message.toString();
+      const msgTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+      
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('mqtt_rx'),
+          time: msgTime,
+          type: 'SENSOR',
+          msg: `📥 MQTT RECV [${topic}]: ${payloadString}`
+        }
+      ]);
+
+      // Parse payload status to sync actuator relays
+      try {
+        const payloadUpper = payloadString.trim().toUpperCase();
+        
+        if (payloadString.startsWith('{')) {
+          const parsed = JSON.parse(payloadString);
+          
+          // E.g. {"lampu": 1, "state": true}
+          if (parsed.hasOwnProperty('lampu') && parsed.hasOwnProperty('state')) {
+            const ch = Number(parsed.lampu);
+            const val = !!parsed.state;
+            if (ch === 1) setRelayLampu1(val);
+            if (ch === 2) setRelayLampu2(val);
+            if (ch === 3) setRelayLampu3(val);
+            if (ch === 4) setRelayLampu4(val);
+          } else {
+            // E.g. {"lampu1": true, "lampu2": false}
+            if (parsed.hasOwnProperty('lampu1')) setRelayLampu1(!!parsed.lampu1);
+            if (parsed.hasOwnProperty('lampu2')) setRelayLampu2(!!parsed.lampu2);
+            if (parsed.hasOwnProperty('lampu3')) setRelayLampu3(!!parsed.lampu3);
+            if (parsed.hasOwnProperty('lampu4')) setRelayLampu4(!!parsed.lampu4);
+          }
+
+          // Parse sensor values from hardware telemetry
+          if (parsed.hasOwnProperty('temp')) setTemp(Number(parsed.temp));
+          if (parsed.hasOwnProperty('humidity')) setHumidity(Number(parsed.humidity));
+        } else {
+          // Plain Text commands parsing
+          if (payloadUpper === 'L1_ON') setRelayLampu1(true);
+          if (payloadUpper === 'L1_OFF') setRelayLampu1(false);
+          if (payloadUpper === 'L2_ON') setRelayLampu2(true);
+          if (payloadUpper === 'L2_OFF') setRelayLampu2(false);
+          if (payloadUpper === 'L3_ON') setRelayLampu3(true);
+          if (payloadUpper === 'L3_OFF') setRelayLampu3(false);
+          if (payloadUpper === 'L4_ON') setRelayLampu4(true);
+          if (payloadUpper === 'L4_OFF') setRelayLampu4(false);
+        }
+      } catch (e) {
+        // Safe catch json error
+      }
+    });
+
+    client.on('error', (err) => {
+      const errTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('mqtt_err'),
+          time: errTime,
+          type: 'ALERT',
+          msg: `🔴 MQTT ERROR: ${err.message || 'Gagal tersambung ke broker'}`
+        }
+      ]);
+    });
+
+    client.on('close', () => {
+      setMqttConnected(false);
+    });
+
+    return () => {
+      client.end();
+    };
+  }, [brokerUrl, subTopic, mqttClientId]);
+
+  // Master switch control
+  const handleMasterLampu = (stateVal: boolean) => {
+    setRelayLampu1(stateVal);
+    setRelayLampu2(stateVal);
+    setRelayLampu3(stateVal);
+    setRelayLampu4(stateVal);
+
+    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+
+    if (mqttClient && mqttConnected) {
+      const payloadText = stateVal ? 'ALL_ON' : 'ALL_OFF';
+      mqttClient.publish(pubTopic, payloadText, { qos: 1 });
+      
+      // Publish individual channels too for robust backup
+      mqttClient.publish(pubTopic, `L1_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+      mqttClient.publish(pubTopic, `L2_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+      mqttClient.publish(pubTopic, `L3_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+      mqttClient.publish(pubTopic, `L4_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('pub_master'),
+          time: timestamp,
+          type: 'CMD',
+          msg: `📡 MQTT PUBLISH MASTER [${pubTopic}]: payload = "${payloadText}"`
+        }
+      ]);
+    } else {
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('master_offline'),
+          time: timestamp,
+          type: 'SYSTEM',
+          msg: `⚠️ MQTT OFFLINE: Perintah disimpan secara lokal. SEMUA LAMPU -> ${stateVal ? 'ON' : 'OFF'}`
+        }
+      ]);
+    }
+  };
 
   // Toggle controls helper
   const handleToggleLampu = (id: 1 | 2 | 3 | 4) => {
@@ -208,33 +384,31 @@ export default function App() {
 
     const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
     
-    // Add command log
-    setLogs(prev => [
-      ...prev,
-      {
-        id: Date.now().toString(),
-        time: timestamp,
-        type: 'CMD',
-        msg: `CMD_SENT SHIELD_RELAY: ${name.toUpperCase()} (${pin}) -> ${nextState ? 'ON (HIGH)' : 'OFF (LOW)'}`
-      }
-    ]);
-  };
+    // Command format text payload
+    const payloadText = `L${id}_${nextState ? 'ON' : 'OFF'}`;
 
-  const handleToggleFan = () => {
-    const nextState = !relayFan;
-    setRelayFan(nextState);
-    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
-    
-    // Add command log
-    setLogs(prev => [
-      ...prev,
-      {
-        id: Date.now().toString(),
-        time: timestamp,
-        type: 'CMD',
-        msg: `CMD_SENT RELAY_AUX_FAN -> ${nextState ? 'ON (HIGH)' : 'OFF (LOW)'}`
-      }
-    ]);
+    if (mqttClient && mqttConnected) {
+      mqttClient.publish(pubTopic, payloadText, { qos: 1 });
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('toggle_tx'),
+          time: timestamp,
+          type: 'CMD',
+          msg: `📡 MQTT PUBLISH [${pubTopic}]: payload = "${payloadText}" (${name})`
+        }
+      ]);
+    } else {
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('toggle_offline'),
+          time: timestamp,
+          type: 'SYSTEM',
+          msg: `⚠️ MQTT OFFLINE (Gagal Kirim): Perintah disimpan lokal. ${name.toUpperCase()} -> ${nextState ? 'ON' : 'OFF'}`
+        }
+      ]);
+    }
   };
 
   // Switch hardware device profile
@@ -251,7 +425,7 @@ export default function App() {
     setLogs(prev => [
       ...prev,
       {
-        id: Date.now().toString(),
+        id: generateLogId('switch_profile'),
         time: timestamp,
         type: 'SYSTEM',
         msg: `SYSTEM_PVM: SWITCHED PROFILE TO ${target} (${targetIp})`
@@ -277,7 +451,7 @@ export default function App() {
     setLogs(prev => [
       ...prev,
       {
-        id: Date.now().toString(),
+        id: generateLogId('export_logs'),
         time: timestamp,
         type: 'SYSTEM',
         msg: `USER_ACTION: TELEMETRY DATA EXPORTED AS CSV (${logs.length} RECORDS)`
@@ -287,23 +461,23 @@ export default function App() {
 
   // Simulate diagnostic failure
   const handleSimulateOutage = () => {
-    setIsConnected(false);
+    setIsSimulatedOutage(true);
     const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
     
     setLogs(prev => [
       ...prev,
-      { id: Date.now().toString() + '_err1', time: timestamp, type: 'ALERT', msg: '🚨 ERROR: SOCKET CONNECTION TIMEOUT over port 8883 (MQTT secure)' },
-      { id: Date.now().toString() + '_err2', time: timestamp, type: 'SYSTEM', msg: '🔧 DIAGNOSTICS: ESP32 client is attempting reconnection (Attempt 1/5)...' }
+      { id: generateLogId('err1'), time: timestamp, type: 'ALERT', msg: '🚨 ERROR: SOCKET CONNECTION TIMEOUT over WebSocket channel (MQTT)' },
+      { id: generateLogId('err2'), time: timestamp, type: 'SYSTEM', msg: '🔧 DIAGNOSTICS: Web client is simulating offline behavior...' }
     ]);
 
     // Automatically recover connection after 6 seconds
     setTimeout(() => {
-      setIsConnected(true);
+      setIsSimulatedOutage(false);
       const recoveryTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
       setLogs(prev => [
         ...prev,
-        { id: Date.now().toString() + '_ok1', time: recoveryTime, type: 'SYSTEM', msg: '✅ MQTT RECONNECTED: Session restored successfully.' },
-        { id: Date.now().toString() + '_ok2', time: recoveryTime, type: 'SENSOR', msg: `DATA_RECEIVED SYSTEM_UPTIME_SYNC OK | IP: ${ipAddress}` }
+        { id: generateLogId('ok1'), time: recoveryTime, type: 'SYSTEM', msg: '✅ MQTT RECONNECTED: Session restored during simulation.' },
+        { id: generateLogId('ok2'), time: recoveryTime, type: 'SENSOR', msg: `DATA_RECEIVED SYSTEM_UPTIME_SYNC OK | IP: ${ipAddress}` }
       ]);
     }, 6000);
   };
@@ -377,7 +551,7 @@ export default function App() {
               if (isConnected) {
                 handleSimulateOutage();
               } else {
-                setIsConnected(true);
+                setIsSimulatedOutage(false);
               }
             }}
             className={`flex items-center gap-2 px-3.5 py-2 rounded-2xl border transition-all duration-300 text-xs font-semibold select-none group cursor-pointer ${
@@ -405,70 +579,180 @@ export default function App() {
 
       {/* 2. Interactive Calibration Drawer Toolbar */}
       <div className="w-full mb-4" id="calibration_toolbar">
-        <div className={`transition-all duration-300 rounded-2xl overflow-hidden border ${isCalibrating ? 'bg-zinc-900/85 border-zinc-700 py-4 px-6 mb-2 opacity-100 max-h-[500px]' : 'bg-transparent border-transparent max-h-0 py-0 px-0 mb-0 opacity-0 pointer-events-none'}`}>
-          <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4">
-            <div>
-              <h4 className="text-sm font-bold text-white flex items-center gap-2">
-                <SlidersHorizontal className="w-4 h-4 text-orange-400" />
-                Panel Kalibrasi & Konfigurasi Batas Alarm
-              </h4>
-              <p className="text-xs text-zinc-400">Atur parameter dan nilai threshold sensor untuk menguji pemrosesan sinyal sirkuit otomatis.</p>
+        <div className={`transition-all duration-300 rounded-2xl overflow-hidden border ${isCalibrating ? 'bg-zinc-900/85 border-zinc-700 py-5 px-6 mb-2 opacity-100 max-h-[1000px]' : 'bg-transparent border-transparent max-h-0 py-0 px-0 mb-0 opacity-0 pointer-events-none'}`}>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-6 items-start">
+            {/* Left Column: Alerts and Thresholds */}
+            <div className="space-y-4">
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <SlidersHorizontal className="w-4 h-4 text-orange-400" />
+                  Panel Kalibrasi & Konfigurasi Batas Alarm
+                </h4>
+                <p className="text-xs text-zinc-400">Atur parameter dan nilai threshold sensor untuk menguji pemrosesan sinyal sirkuit otomatis.</p>
+              </div>
+              
+              <div className="space-y-4 pt-1">
+                <div>
+                  <label className="block text-[11px] text-zinc-400 uppercase font-bold tracking-wider mb-1">
+                    Maksimal Suhu Alert ({tempThreshold}°C)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="range" 
+                      min="20" 
+                      max="40" 
+                      step="0.5" 
+                      value={tempThreshold} 
+                      onChange={(e) => setTempThreshold(parseFloat(e.target.value))}
+                      className="w-full accent-orange-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg"
+                    />
+                    <span className="text-xs font-mono text-zinc-300 min-w-[20px] text-right">{tempThreshold}</span>
+                  </div>
+                </div>
+
+                <div>
+                  <label className="block text-[11px] text-zinc-400 uppercase font-bold tracking-wider mb-1">
+                    Min Kelembapan Alert ({humidityMinThreshold}%)
+                  </label>
+                  <div className="flex items-center gap-2">
+                    <input 
+                      type="range" 
+                      min="30" 
+                      max="80" 
+                      step="1.0" 
+                      value={humidityMinThreshold} 
+                      onChange={(e) => setHumidityMinThreshold(parseFloat(e.target.value))}
+                      className="w-full accent-blue-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg"
+                    />
+                    <span className="text-xs font-mono text-zinc-300 min-w-[20px] text-right">{humidityMinThreshold}</span>
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-2 pt-1">
+                  <button 
+                    onClick={() => {
+                      setTemp(24.8);
+                      setHumidity(62.0);
+                      setTempThreshold(29.5);
+                      setHumidityMinThreshold(45.0);
+                      
+                      const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+                      setLogs(prev => [
+                        ...prev,
+                        { id: generateLogId('reset'), time: timestamp, type: 'SYSTEM', msg: 'SYSTEM_RESET: Calibration constants reverted to defaults.' }
+                      ]);
+                    }}
+                    className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs px-3.5 py-1.5 rounded-xl border border-zinc-700 font-semibold cursor-pointer transition-colors"
+                  >
+                    Reset Default Dials
+                  </button>
+                </div>
+              </div>
             </div>
-            <div className="flex flex-wrap gap-4 w-full md:w-auto">
-              <div className="flex-1 min-w-[150px]">
-                <label className="block text-[11px] text-zinc-400 uppercase font-bold tracking-wider mb-1">
-                  Maksimal Suhu Alert ({tempThreshold}°C)
-                </label>
-                <div className="flex items-center gap-2">
-                  <input 
-                    type="range" 
-                    min="20" 
-                    max="40" 
-                    step="0.5" 
-                    value={tempThreshold} 
-                    onChange={(e) => setTempThreshold(parseFloat(e.target.value))}
-                    className="w-full accent-orange-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg"
-                  />
-                  <span className="text-xs font-mono text-zinc-300 min-w-[20px] text-right">{tempThreshold}</span>
-                </div>
+
+            {/* Right Column: Real MQTT Connection Credentials */}
+            <div className="border-t md:border-t-0 md:border-l border-zinc-800/80 md:pl-6 pt-4 md:pt-0 space-y-4">
+              <div>
+                <h4 className="text-sm font-bold text-white flex items-center gap-2">
+                  <Signal className="w-4 h-4 text-emerald-400" />
+                  Konfigurasi Jaringan & Broker MQTT (WS)
+                </h4>
+                <p className="text-xs text-zinc-400">Atur kredensial MQTT WebSockets agar bisa berinteraksi langsung dengan ESP32 fisik.</p>
               </div>
 
-              <div className="flex-1 min-w-[150px]">
-                <label className="block text-[11px] text-zinc-400 uppercase font-bold tracking-wider mb-1">
-                  Min Kelembapan Alert ({humidityMinThreshold}%)
-                </label>
-                <div className="flex items-center gap-2">
+              <div className="space-y-3 pt-1">
+                <div>
+                  <label className="block text-[10px] text-zinc-400 uppercase font-bold tracking-wider mb-0.5">
+                    Broker WebSocket URL (ws:// atau wss://)
+                  </label>
                   <input 
-                    type="range" 
-                    min="30" 
-                    max="80" 
-                    step="1.0" 
-                    value={humidityMinThreshold} 
-                    onChange={(e) => setHumidityMinThreshold(parseFloat(e.target.value))}
-                    className="w-full accent-blue-500 cursor-pointer h-1.5 bg-zinc-800 rounded-lg"
+                    type="text"
+                    value={inputBrokerUrl}
+                    onChange={(e) => setInputBrokerUrl(e.target.value)}
+                    placeholder="wss://broker.emqx.io:8084/mqtt"
+                    className="w-full text-xs font-mono bg-zinc-950 text-zinc-200 border border-zinc-800 px-3 py-1.5 rounded-xl focus:border-orange-500 focus:outline-none"
                   />
-                  <span className="text-xs font-mono text-zinc-300 min-w-[20px] text-right">{humidityMinThreshold}</span>
                 </div>
-              </div>
 
-              <div className="flex items-end">
-                <button 
-                  onClick={() => {
-                    setTemp(24.8);
-                    setHumidity(62.0);
-                    setTempThreshold(29.5);
-                    setHumidityMinThreshold(45.0);
-                    
-                    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
-                    setLogs(prev => [
-                      ...prev,
-                      { id: Date.now().toString(), time: timestamp, type: 'SYSTEM', msg: 'SYSTEM_RESET: Calibration constants reverted to defaults.' }
-                    ]);
-                  }}
-                  className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 text-xs px-3 py-1.5 rounded-xl border border-zinc-700 font-semibold cursor-pointer transition-colors w-full md:w-auto"
-                >
-                  Reset Default
-                </button>
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[10px] text-zinc-400 uppercase font-bold tracking-wider mb-0.5">
+                      Publish Topic (Tx)
+                    </label>
+                    <input 
+                      type="text"
+                      value={inputPubTopic}
+                      onChange={(e) => setInputPubTopic(e.target.value)}
+                      placeholder="esp32/relay/control"
+                      className="w-full text-xs font-mono bg-zinc-950 text-zinc-200 border border-zinc-800 px-3 py-1.5 rounded-xl focus:border-orange-500 focus:outline-none"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-zinc-400 uppercase font-bold tracking-wider mb-0.5">
+                      Subscribe Topic (Rx / Feedback)
+                    </label>
+                    <input 
+                      type="text"
+                      value={inputSubTopic}
+                      onChange={(e) => setInputSubTopic(e.target.value)}
+                      placeholder="esp32/relay/status"
+                      className="w-full text-xs font-mono bg-zinc-950 text-zinc-200 border border-zinc-800 px-3 py-1.5 rounded-xl focus:border-orange-500 focus:outline-none"
+                    />
+                  </div>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-[9px] font-bold text-zinc-500 uppercase">Presets:</span>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInputBrokerUrl('wss://broker.emqx.io:8084/mqtt');
+                        setInputPubTopic('esp32/relay/control');
+                        setInputSubTopic('esp32/relay/status');
+                      }}
+                      className="text-[9px] bg-zinc-800 hover:bg-zinc-750 font-bold px-2 py-1 rounded text-zinc-300 cursor-pointer"
+                    >
+                      EMQX Public
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInputBrokerUrl('wss://broker.hivemq.com:8884/mqtt');
+                        setInputPubTopic('esp32/relay/control');
+                        setInputSubTopic('esp32/relay/status');
+                      }}
+                      className="text-[9px] bg-zinc-800 hover:bg-zinc-750 font-bold px-2 py-1 rounded text-zinc-300 cursor-pointer"
+                    >
+                      HiveMQ
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setInputBrokerUrl('ws://192.168.1.104:9001');
+                        setInputPubTopic('esp32/relay/control');
+                        setInputSubTopic('esp32/relay/status');
+                      }}
+                      className="text-[9px] bg-zinc-800 hover:bg-zinc-750 font-bold px-2 py-1 rounded text-zinc-300 cursor-pointer"
+                      title="Gunakan IP lokal (port WS default local MQTT)"
+                    >
+                      Local WS IP
+                    </button>
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setBrokerUrl(inputBrokerUrl);
+                      setPubTopic(inputPubTopic);
+                      setSubTopic(inputSubTopic);
+                    }}
+                    className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] uppercase tracking-wider px-3.5 py-1.5 font-bold rounded-xl cursor-pointer transition-colors active:scale-95 flex items-center gap-1.5"
+                  >
+                    <RefreshCw className="w-3 h-3 text-emerald-200" />
+                    Hubungkan Jaringan
+                  </button>
+                </div>
               </div>
             </div>
           </div>
@@ -478,12 +762,12 @@ export default function App() {
           onClick={() => setIsCalibrating(c => !c)}
           className={`flex items-center gap-2 py-1.5 px-3.5 rounded-xl border text-xs font-semibold cursor-pointer transition-all ${
             isCalibrating 
-              ? 'bg-orange-500/10 text-orange-400 border-orange-500/40 hover:bg-orange-500/20' 
+              ? 'bg-orange-500/10 text-orange-400 border-orange-500/45 hover:bg-orange-500/20' 
               : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:text-zinc-200 hover:border-zinc-700'
           }`}
         >
           <SlidersHorizontal className="w-3.5 h-3.5" />
-          <span>{isCalibrating ? 'Sembunyikan Menu Kalibrasi' : 'Buka Menu Kalibrasi Hambatan'}</span>
+          <span>{isCalibrating ? 'Sembunyikan Pengaturan MQTT & Batas Alarm' : 'Buka Pengaturan MQTT & Kalibrasi Hambatan'}</span>
         </button>
       </div>
 
@@ -641,7 +925,7 @@ export default function App() {
               <div 
                 className="h-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all duration-300 rounded-full"
                 style={{ width: `${humidityPercentage}%` }}
-              />
+                      />
             </div>
           </div>
         </div>
@@ -681,44 +965,14 @@ export default function App() {
           {/* Quick Master Controls */}
           <div className="flex items-center gap-2 mt-3 mb-1.5 relative z-10 bg-zinc-200/50 p-1 rounded-xl border border-zinc-350/50">
             <button
-              onClick={() => {
-                setRelayLampu1(true);
-                setRelayLampu2(true);
-                setRelayLampu3(true);
-                setRelayLampu4(true);
-                const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
-                setLogs(prev => [
-                  ...prev,
-                  {
-                    id: Date.now().toString(),
-                    time: timestamp,
-                    type: 'CMD',
-                    msg: `CMD_SENT MASTER_CONTROL -> ALL RELAY LAMPS (1-4) ACTIVATED`
-                  }
-                ]);
-              }}
+              onClick={() => handleMasterLampu(true)}
               className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[9px] uppercase rounded-lg tracking-wider transition-colors duration-200 cursor-pointer text-center"
               title="Nyalakan semua lampu relays"
             >
               Nyalakan Semua
             </button>
             <button
-              onClick={() => {
-                setRelayLampu1(false);
-                setRelayLampu2(false);
-                setRelayLampu3(false);
-                setRelayLampu4(false);
-                const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
-                setLogs(prev => [
-                  ...prev,
-                  {
-                    id: Date.now().toString(),
-                    time: timestamp,
-                    type: 'CMD',
-                    msg: `CMD_SENT MASTER_CONTROL -> ALL RELAY LAMPS (1-4) DEACTIVATED`
-                  }
-                ]);
-              }}
+              onClick={() => handleMasterLampu(false)}
               className="flex-1 py-1.5 px-2 bg-red-600 hover:bg-red-700 text-white font-extrabold text-[9px] uppercase rounded-lg tracking-wider transition-colors duration-200 cursor-pointer text-center"
               title="Matikan semua lampu relays"
             >
@@ -834,36 +1088,9 @@ export default function App() {
                 </div>
               </button>
             </div>
-
-            {/* Auxiliary Exhaust Relay Control (Relay Fan) kept for rich controls */}
-            <div className="flex items-center justify-between p-2.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-xl transition-all border border-zinc-300/60">
-              <div className="flex items-center gap-2.5">
-                <span className={`w-2.5 h-2.5 rounded-full ${relayFan ? 'bg-blue-500 animate-spin' : 'bg-zinc-400'}`} />
-                <div>
-                  <h5 className="font-extrabold text-xs text-zinc-900 uppercase tracking-tight">Sirkulasi Kipas (Aux Fan)</h5>
-                  <p className="text-[10px] text-zinc-550 font-bold">{relayFan ? 'Status: BERPUTAR' : 'Status: BERHENTI'} | Pin D9</p>
-                </div>
-              </div>
-
-              <button 
-                onClick={handleToggleFan}
-                className={`w-14 h-7 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center relative ${
-                  relayFan ? 'bg-zinc-950' : 'bg-zinc-300'
-                }`}
-                title="Memicu relay kipas penyejuk"
-              >
-                <div 
-                  className={`w-6 h-6 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center ${
-                    relayFan ? 'translate-x-7 bg-blue-550 text-white' : 'translate-x-0 bg-white text-zinc-400'
-                  }`}
-                >
-                  <RefreshCw className="w-3.5 h-3.5" />
-                </div>
-              </button>
-            </div>
           </div>
 
-          <div className="flex flex-col gap-1 text-[10px] opacity-75 font-mono z-10 text-zinc-600 mt-2">
+          <div className="flex flex-col gap-1 text-[10px] opacity-75 font-mono z-10 text-zinc-650 mt-2">
             <div className="flex justify-between border-t border-zinc-300/80 pt-2 font-bold">
               <span>DEVICE_ID:</span>
               <span>{deviceType}</span>
