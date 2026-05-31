@@ -28,7 +28,9 @@ import {
   Lightbulb,
   Copy,
   Check,
-  BookOpen
+  BookOpen,
+  Mic,
+  MicOff
 } from 'lucide-react';
 
 interface LogEntry {
@@ -103,6 +105,15 @@ export default function App() {
   const [activeSimulatorTab, setActiveSimulatorTab] = useState<'emulator' | 'http' | 'mqtt' | 'schematic'>('emulator');
   const [codeCopied, setCodeCopied] = useState<boolean>(false);
   const [relayLogicMode, setRelayLogicMode] = useState<'high' | 'low'>('low'); // 'low' is active-low (common), 'high' is active-high
+
+  // Voice Command Assistant state variables
+  const [isListening, setIsListening] = useState<boolean>(false);
+  const [transcript, setTranscript] = useState<string>('');
+  const [voiceStatus, setVoiceStatus] = useState<string>('Siap menerima perintah suara...');
+  const [useSpeechSynthesis, setUseSpeechSynthesis] = useState<boolean>(true);
+  const [activeVoiceTab, setActiveVoiceTab] = useState<'voice' | 'system'>('voice');
+  const [lastMatchedCommand, setLastMatchedCommand] = useState<string>('');
+  const recognitionRef = useRef<any>(null);
 
   // Bottom scroll Ref for terminal logs
   const terminalEndRef = useRef<HTMLDivElement>(null);
@@ -479,6 +490,240 @@ export default function App() {
           msg: `⚡ SISTEM OK (Sinkron REST API & Lokal): ${name.toUpperCase()} -> ${nextState ? 'ON' : 'OFF'} (${pin})`
         }
       ]);
+    }
+  };
+
+  // Set explicit state control helper
+  const handleSetLampu = (id: 1 | 2 | 3 | 4, nextState: boolean) => {
+    let name = '';
+    let pin = '';
+    if (id === 1) {
+      setRelayLampu1(nextState);
+      name = 'Lampu 1';
+      pin = 'Pin D5';
+    } else if (id === 2) {
+      setRelayLampu2(nextState);
+      name = 'Lampu 2';
+      pin = 'Pin D6';
+    } else if (id === 3) {
+      setRelayLampu3(nextState);
+      name = 'Lampu 3';
+      pin = 'Pin D7';
+    } else if (id === 4) {
+      setRelayLampu4(nextState);
+      name = 'Lampu 4';
+      pin = 'Pin D8';
+    }
+
+    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    
+    // Command format text payload
+    const payloadText = `L${id}_${nextState ? 'ON' : 'OFF'}`;
+
+    // Sync to Express backend API
+    fetch(`/api/relay/toggle?channel=${id}&state=${nextState}`).catch(() => {});
+
+    if (mqttClient && mqttConnected) {
+      mqttClient.publish(pubTopic, payloadText, { qos: 1 });
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('toggle_tx'),
+          time: timestamp,
+          type: 'CMD',
+          msg: `📡 MQTT PUBLISH [${pubTopic}]: payload = "${payloadText}" (${name})`
+        }
+      ]);
+    } else {
+      setLogs(prev => [
+        ...prev,
+        {
+          id: generateLogId('toggle_offline'),
+          time: timestamp,
+          type: 'SYSTEM',
+          msg: `⚡ SISTEM OK (Sinkron REST API & Lokal): ${name.toUpperCase()} -> ${nextState ? 'ON' : 'OFF'} (${pin})`
+        }
+      ]);
+    }
+  };
+
+  // Text to Speech Response
+  const speakResponse = (text: string) => {
+    if (!useSpeechSynthesis) return;
+    try {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel(); // cancel any active speaking
+        const utterance = new SpeechSynthesisUtterance(text);
+        utterance.lang = 'id-ID'; // Indonesian
+        
+        // Find Indonesian voice if possible
+        const voices = window.speechSynthesis.getVoices();
+        const idVoice = voices.find(v => v.lang.startsWith('id') || v.lang.includes('id-ID'));
+        if (idVoice) {
+          utterance.voice = idVoice;
+        }
+        
+        window.speechSynthesis.speak(utterance);
+      }
+    } catch (e) {
+      console.warn("Speech synthesis failed", e);
+    }
+  };
+
+  // Process Voice Commands with Robust Indonesian matching
+  const processVoiceCommand = (cmd: string) => {
+    const speech = cmd.toLowerCase().trim();
+    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    
+    setLogs(prev => [
+      ...prev,
+      {
+        id: generateLogId('voice_rx'),
+        time: timestamp,
+        type: 'CMD',
+        msg: `🎙️ SUARA DITERIMA: "${cmd}"`
+      }
+    ]);
+
+    // Command matching
+    // Lampu 1
+    if (speech.includes('nyalakan lampu 1') || speech.includes('nyalakan lampu satu') || speech.includes('hidupkan lampu 1') || speech.includes('hidupkan lampu satu') || (speech.includes('lampu 1') && speech.includes('on')) || (speech.includes('lampu satu') && speech.includes('on'))) {
+      handleSetLampu(1, true);
+      setLastMatchedCommand('Nyalakan Lampu 1');
+      setVoiceStatus('Berhasil: Lampu 1 Dinyalakan');
+      speakResponse('Lampu satu dinyalakan.');
+    } else if (speech.includes('matikan lampu 1') || speech.includes('matikan lampu satu') || speech.includes('padamkan lampu 1') || speech.includes('padamkan lampu satu') || (speech.includes('lampu 1') && speech.includes('off')) || (speech.includes('lampu satu') && speech.includes('off'))) {
+      handleSetLampu(1, false);
+      setLastMatchedCommand('Matikan Lampu 1');
+      setVoiceStatus('Berhasil: Lampu 1 Dimatikan');
+      speakResponse('Lampu satu dimatikan.');
+    }
+    // Lampu 2
+    else if (speech.includes('nyalakan lampu 2') || speech.includes('nyalakan lampu dua') || speech.includes('hidupkan lampu 2') || speech.includes('hidupkan lampu dua') || (speech.includes('lampu 2') && speech.includes('on')) || (speech.includes('lampu dua') && speech.includes('on'))) {
+      handleSetLampu(2, true);
+      setLastMatchedCommand('Nyalakan Lampu 2');
+      setVoiceStatus('Berhasil: Lampu 2 Dinyalakan');
+      speakResponse('Lampu dua dinyalakan.');
+    } else if (speech.includes('matikan lampu 2') || speech.includes('matikan lampu dua') || speech.includes('padamkan lampu 2') || speech.includes('padamkan lampu dua') || (speech.includes('lampu 2') && speech.includes('off')) || (speech.includes('lampu dua') && speech.includes('off'))) {
+      handleSetLampu(2, false);
+      setLastMatchedCommand('Matikan Lampu 2');
+      setVoiceStatus('Berhasil: Lampu 2 Dimatikan');
+      speakResponse('Lampu dua dimatikan.');
+    }
+    // Lampu 3
+    else if (speech.includes('nyalakan lampu 3') || speech.includes('nyalakan lampu tiga') || speech.includes('hidupkan lampu 3') || speech.includes('hidupkan lampu tiga') || (speech.includes('lampu 3') && speech.includes('on')) || (speech.includes('lampu tiga') && speech.includes('on'))) {
+      handleSetLampu(3, true);
+      setLastMatchedCommand('Nyalakan Lampu 3');
+      setVoiceStatus('Berhasil: Lampu 3 Dinyalakan');
+      speakResponse('Lampu tiga dinyalakan.');
+    } else if (speech.includes('matikan lampu 3') || speech.includes('matikan lampu tiga') || speech.includes('padamkan lampu 3') || speech.includes('padamkan lampu tiga') || (speech.includes('lampu 3') && speech.includes('off')) || (speech.includes('lampu tiga') && speech.includes('off'))) {
+      handleSetLampu(3, false);
+      setLastMatchedCommand('Matikan Lampu 3');
+      setVoiceStatus('Berhasil: Lampu 3 Dimatikan');
+      speakResponse('Lampu tiga dimatikan.');
+    }
+    // Lampu 4
+    else if (speech.includes('nyalakan lampu 4') || speech.includes('nyalakan lampu empat') || speech.includes('hidupkan lampu 4') || speech.includes('hidupkan lampu empat') || (speech.includes('lampu 4') && speech.includes('on')) || (speech.includes('lampu empat') && speech.includes('on'))) {
+      handleSetLampu(4, true);
+      setLastMatchedCommand('Nyalakan Lampu 4');
+      setVoiceStatus('Berhasil: Lampu 4 Dinyalakan');
+      speakResponse('Lampu empat dinyalakan.');
+    } else if (speech.includes('matikan lampu 4') || speech.includes('matikan lampu empat') || speech.includes('padamkan lampu 4') || speech.includes('padamkan lampu empat') || (speech.includes('lampu 4') && speech.includes('off')) || (speech.includes('lampu empat') && speech.includes('off'))) {
+      handleSetLampu(4, false);
+      setLastMatchedCommand('Matikan Lampu 4');
+      setVoiceStatus('Berhasil: Lampu 4 Dimatikan');
+      speakResponse('Lampu empat dimatikan.');
+    }
+    // All on
+    else if (speech.includes('all on') || speech.includes('nyalakan semua') || speech.includes('hidupkan semua') || speech.includes('semua on') || speech.includes('semua hidup')) {
+      handleMasterLampu(true);
+      setLastMatchedCommand('Nyalakan Semua');
+      setVoiceStatus('Berhasil: Nyalakan Semua Lampu');
+      speakResponse('Semua lampu dinyalakan.');
+    }
+    // All off
+    else if (speech.includes('all off') || speech.includes('matikan semua') || speech.includes('padamkan semua') || speech.includes('semua off') || speech.includes('semua mati')) {
+      handleMasterLampu(false);
+      setLastMatchedCommand('Matikan Semua');
+      setVoiceStatus('Berhasil: Matikan Semua Lampu');
+      speakResponse('Semua lampu dimatikan.');
+    }
+    // Cek status sensor
+    else if (speech.includes('status sensor') || speech.includes('cek sensor') || speech.includes('cek status') || speech.includes('baca sensor') || speech.includes('berapa suhu') || speech.includes('suhu berapa') || speech.includes('cek kelembaban')) {
+      setLastMatchedCommand('Cek Status Sensor');
+      const responseText = `Status sensor saat ini. Suhu: ${temp.toFixed(1)} derajat Celsius. Kelebapan: ${humidity.toFixed(1)} persen.`;
+      setVoiceStatus(`Pembacaan: Suhu ${temp.toFixed(1)}°C, Hum ${humidity.toFixed(1)}%`);
+      speakResponse(responseText);
+    }
+    // unrecognized
+    else {
+      setLastMatchedCommand('Tidak Dikenali');
+      setVoiceStatus(`Perintah tidak dikenali: "${cmd}"`);
+      speakResponse('Perintah tidak dikenali, silakan coba lagi.');
+    }
+  };
+
+  // Start Speech Recognition Engine
+  const startSpeechRecognition = () => {
+    const SpeechRecognitionAPI = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SpeechRecognitionAPI) {
+      setVoiceStatus('Browser Anda tidak mendukung kendali suara.');
+      return;
+    }
+
+    try {
+      if (recognitionRef.current) {
+        recognitionRef.current.abort();
+      }
+
+      const rec = new SpeechRecognitionAPI();
+      rec.continuous = false; // single-shot pattern (cleaner resource cleanup)
+      rec.interimResults = false;
+      rec.lang = 'id-ID';
+
+      rec.onstart = () => {
+        setIsListening(true);
+        setVoiceStatus('Mendengarkan... Silakan bicara.');
+        setTranscript('');
+      };
+
+      rec.onerror = (event: any) => {
+        console.error("Speech error", event);
+        setIsListening(false);
+        if (event.error === 'no-speech') {
+          setVoiceStatus('Tidak terdengar suara. Coba lagi.');
+        } else if (event.error === 'not-allowed') {
+          setVoiceStatus('Izin mikrofon ditolak.');
+        } else {
+          setVoiceStatus(`Galat: ${event.error}`);
+        }
+      };
+
+      rec.onend = () => {
+        setIsListening(false);
+      };
+
+      rec.onresult = (event: any) => {
+        const text = event.results[0][0].transcript;
+        setTranscript(text);
+        processVoiceCommand(text);
+      };
+
+      recognitionRef.current = rec;
+      rec.start();
+    } catch (err) {
+      console.error(err);
+      setVoiceStatus('Gagal memulai mikrofon.');
+      setIsListening(false);
+    }
+  };
+
+  // Stop Speech Recognition Engine
+  const stopSpeechRecognition = () => {
+    if (recognitionRef.current) {
+      recognitionRef.current.stop();
+      setIsListening(false);
+      setVoiceStatus('Kendali suara dihentikan.');
     }
   };
 
@@ -1573,62 +1818,173 @@ void loop() {
           </div>
         </div>
 
-        {/* CARD E: System Health & Outages (col-span-4 row-span-2) */}
+        {/* CARD E: System Health & Asisten Suara (col-span-4 row-span-2) */}
         <div 
           className="col-span-1 md:col-span-4 md:row-span-2 bg-zinc-900/60 border border-zinc-850 rounded-[2rem] p-6 flex flex-col justify-between hover:border-zinc-700 transition-all duration-300 shadow-md"
           id="card_system_health"
         >
           <div className="flex justify-between items-center pb-2 border-b border-zinc-800/40">
-            <span className="text-[10px] font-bold text-zinc-500 uppercase tracking-widest">KESEHATAN SISTEM</span>
-            <div className="flex items-center gap-1">
-              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full" />
-              <span className="text-[9px] font-semibold text-zinc-400">CPU UPTIME OK</span>
+            <div className="flex bg-zinc-950/80 p-0.5 rounded-lg border border-zinc-805/80">
+              <button
+                type="button"
+                onClick={() => setActiveVoiceTab('voice')}
+                className={`text-[9px] font-bold px-2 py-1 rounded transition-all cursor-pointer ${
+                  activeVoiceTab === 'voice' ? 'bg-orange-600 text-white shadow font-extrabold' : 'text-zinc-500 hover:text-zinc-350'
+                }`}
+              >
+                KENDALI SUARA
+              </button>
+              <button
+                type="button"
+                onClick={() => setActiveVoiceTab('system')}
+                className={`text-[9px] font-bold px-2 py-1 rounded transition-all cursor-pointer ${
+                  activeVoiceTab === 'system' ? 'bg-orange-600 text-white shadow font-extrabold' : 'text-zinc-500 hover:text-zinc-350'
+                }`}
+              >
+                SISTEM
+              </button>
+            </div>
+            
+            <div className="flex items-center gap-1 bg-zinc-950 px-2 py-0.5 rounded-full border border-zinc-900">
+              <span className={`w-1.5 h-1.5 rounded-full ${isListening ? 'bg-amber-400 animate-pulse' : 'bg-emerald-500'}`} />
+              <span className="text-[8px] font-bold text-zinc-400 font-sans uppercase">
+                {isListening ? 'Mendengarkan' : 'SIAP'}
+              </span>
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-4 py-1 flex-1 items-center">
-            {/* Signal strength element */}
-            <div className="border-r border-zinc-800/55 pr-4">
-              <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-tight mb-2 flex items-center gap-1.5">
-                <Signal className="w-3.5 h-3.5 text-emerald-400" />
-                Kekuatan Sinyal
-              </p>
-              
-              <div className="flex items-baseline gap-1.5 mb-1.5">
-                <span className="text-2xl font-bold font-mono tracking-tight text-zinc-200">
-                  {isConnected ? rssi : '0'}
-                </span>
-                <span className="text-[9px] text-zinc-600 font-bold uppercase font-mono">dBm</span>
+          {activeVoiceTab === 'voice' ? (
+            <div className="flex flex-col flex-1 justify-between gap-2.5 mt-3">
+              {/* Voice action controls */}
+              <div className="flex items-center gap-3">
+                {/* Floating pulsating microphone */}
+                <button
+                  type="button"
+                  onClick={isListening ? stopSpeechRecognition : startSpeechRecognition}
+                  className={`relative shrink-0 w-12 h-12 rounded-full flex items-center justify-center border transition-all duration-300 cursor-pointer ${
+                    isListening
+                      ? 'bg-amber-500/10 border-amber-450 text-amber-400 shadow-[0_0_15px_rgba(245,158,11,0.25)] scale-105'
+                      : 'bg-zinc-950 border-zinc-800 hover:border-zinc-750 text-zinc-400 hover:text-zinc-200'
+                  }`}
+                  title={isListening ? 'Hentikan asisten' : 'Ketuk untuk bicara'}
+                >
+                  {isListening && (
+                    <span className="absolute inset-x-0 inset-y-0 rounded-full border border-amber-400/40 animate-ping" />
+                  )}
+                  {isListening ? <Mic className="w-5 h-5 text-amber-400" /> : <MicOff className="w-5 h-5" />}
+                </button>
+
+                {/* Assistant prompt bubble status */}
+                <div className="flex-1 min-w-0">
+                  <span className="block text-[8px] font-black text-zinc-500 uppercase tracking-widest leading-none mb-1">
+                    TRANSKRIP AUDIO / ASISTEN
+                  </span>
+                  
+                  {transcript ? (
+                    <p className="text-zinc-200 font-bold text-xs truncate leading-tight">
+                      "{transcript}"
+                    </p>
+                  ) : (
+                    <p className="text-zinc-400 italic text-[11px] leading-tight">
+                      {isListening ? 'Katakan perintah ke mikrofon...' : 'Ketuk mikrofon di kiri lalu bicara'}
+                    </p>
+                  )}
+
+                  <p className="text-[9px] font-mono text-orange-400/90 tracking-wide mt-1 truncate leading-none">
+                    {voiceStatus}
+                  </p>
+                </div>
               </div>
 
-              {/* Responsive wireless bars indicator */}
-              <div className="flex items-end gap-1 h-6">
-                <div className={`w-1.5 h-2 rounded-sm ${isConnected && rssi >= -80 ? 'bg-emerald-500' : 'bg-zinc-800'}`} />
-                <div className={`w-1.5 h-3.5 rounded-sm ${isConnected && rssi >= -70 ? 'bg-emerald-500' : 'bg-zinc-800'}`} />
-                <div className={`w-1.5 h-4.5 rounded-sm ${isConnected && rssi >= -65 ? 'bg-emerald-500' : 'bg-zinc-800'}`} />
-                <div className={`w-1.5 h-5.5 rounded-sm ${isConnected && rssi >= -60 ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-800'}`} />
+              {/* Commands guide legend */}
+              <div className="bg-zinc-950/85 p-2.5 rounded-2xl border border-zinc-850/80">
+                <div className="flex justify-between items-center mb-1 pb-1 border-b border-zinc-900">
+                  <span className="text-[8px] font-extrabold text-zinc-500 uppercase tracking-wider">
+                    Daftar Perintah Valid
+                  </span>
+                  {/* TTS Switch */}
+                  <label className="flex items-center gap-1 cursor-pointer text-[8px] font-bold text-zinc-400 select-none">
+                    <input
+                      type="checkbox"
+                      checked={useSpeechSynthesis}
+                      onChange={(e) => setUseSpeechSynthesis(e.target.checked)}
+                      className="accent-orange-500 w-2.5 h-2.5 rounded cursor-pointer"
+                    />
+                    TTS Respon
+                  </label>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-x-2 gap-y-0.5 text-[8.5px] font-mono text-zinc-400 leading-tight">
+                  <div>
+                    <span className="text-orange-400/90">"Nyalakan Lampu [1-4]"</span>
+                  </div>
+                  <div>
+                    <span className="text-orange-400/90">"Matikan Lampu [1-4]"</span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-350 font-medium">"Nyalakan Semua"</span> / <span className="text-zinc-500">all on</span>
+                  </div>
+                  <div>
+                    <span className="text-zinc-350 font-medium">"Matikan Semua"</span> / <span className="text-zinc-500">all off</span>
+                  </div>
+                  <div className="col-span-2 text-zinc-350 border-t border-zinc-900 pt-1 mt-0.5 flex justify-between">
+                    <span>"Cek Status Sensor"</span>
+                    {lastMatchedCommand && (
+                      <span className="text-emerald-400 text-[8px] font-bold uppercase shrink-0">
+                        Match: {lastMatchedCommand}
+                      </span>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
+          ) : (
+            <>
+              <div className="grid grid-cols-2 gap-4 py-1 flex-1 items-center">
+                {/* Signal strength element */}
+                <div className="border-r border-zinc-800/55 pr-4">
+                  <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-tight mb-2 flex items-center gap-1.5">
+                    <Signal className="w-3.5 h-3.5 text-emerald-400" />
+                    Kekuatan Sinyal
+                  </p>
+                  
+                  <div className="flex items-baseline gap-1.5 mb-1.5">
+                    <span className="text-2xl font-bold font-mono tracking-tight text-zinc-200">
+                      {isConnected ? rssi : '0'}
+                    </span>
+                    <span className="text-[9px] text-zinc-600 font-bold uppercase font-mono">dBm</span>
+                  </div>
 
-            {/* Micro timer counter */}
-            <div className="pl-2">
-              <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-tight mb-2 flex items-center gap-1.5">
-                <Clock className="w-3.5 h-3.5 text-zinc-400 animate-spin-slow" />
-                Uptime
-              </p>
-              <p className="text-lg md:text-xl font-bold text-zinc-100 font-mono tracking-tight leading-none">
-                {formatUptimeValue(uptime)}
-              </p>
-              <div className="text-[10px] text-zinc-500 font-mono mt-2 overflow-hidden text-ellipsis whitespace-nowrap">
-                PVM_LOAD: 1.25%
+                  {/* Responsive wireless bars indicator */}
+                  <div className="flex items-end gap-1 h-6">
+                    <div className={`w-1.5 h-2 rounded-sm ${isConnected && rssi >= -80 ? 'bg-emerald-500' : 'bg-zinc-800'}`} />
+                    <div className={`w-1.5 h-3.5 rounded-sm ${isConnected && rssi >= -70 ? 'bg-emerald-500' : 'bg-zinc-800'}`} />
+                    <div className={`w-1.5 h-4.5 rounded-sm ${isConnected && rssi >= -65 ? 'bg-emerald-500' : 'bg-zinc-800'}`} />
+                    <div className={`w-1.5 h-5.5 rounded-sm ${isConnected && rssi >= -60 ? 'bg-emerald-400 animate-pulse' : 'bg-zinc-800'}`} />
+                  </div>
+                </div>
+
+                {/* Micro timer counter */}
+                <div className="pl-2">
+                  <p className="text-[9px] text-zinc-500 uppercase font-bold tracking-tight mb-2 flex items-center gap-1.5">
+                    <Clock className="w-3.5 h-3.5 text-zinc-400 animate-spin-slow" />
+                    Uptime
+                  </p>
+                  <p className="text-lg md:text-xl font-bold text-zinc-100 font-mono tracking-tight leading-none">
+                    {formatUptimeValue(uptime)}
+                  </p>
+                  <div className="text-[10px] text-zinc-500 font-mono mt-2 overflow-hidden text-ellipsis whitespace-nowrap">
+                    PVM_LOAD: 1.25%
+                  </div>
+                </div>
               </div>
-            </div>
-          </div>
 
-          <div className="flex justify-between items-center text-[9px] text-zinc-600 font-mono border-t border-zinc-800/40 pt-2">
-            <span>RSSI: {isConnected ? 'EXCELLENT' : 'RECONNECTING'}</span>
-            <span>MAC: EE:22:DF:34:CC:12</span>
-          </div>
+              <div className="flex justify-between items-center text-[9px] text-zinc-600 font-mono border-t border-zinc-800/40 pt-2">
+                <span>RSSI: {isConnected ? 'EXCELLENT' : 'RECONNECTING'}</span>
+                <span>MAC: EE:22:DF:34:CC:12</span>
+              </div>
+            </>
+          )}
         </div>
 
       </main>
