@@ -23,7 +23,8 @@ import {
   Layers, 
   CheckCircle,
   Settings2,
-  HardDrive
+  HardDrive,
+  Lightbulb
 } from 'lucide-react';
 
 interface LogEntry {
@@ -51,7 +52,10 @@ export default function App() {
   const [humidityMinThreshold, setHumidityMinThreshold] = useState<number>(45.0);
   
   // Actuator/Control States
-  const [relayLight, setRelayLight] = useState<boolean>(true);
+  const [relayLampu1, setRelayLampu1] = useState<boolean>(true);
+  const [relayLampu2, setRelayLampu2] = useState<boolean>(false);
+  const [relayLampu3, setRelayLampu3] = useState<boolean>(false);
+  const [relayLampu4, setRelayLampu4] = useState<boolean>(false);
   const [relayFan, setRelayFan] = useState<boolean>(false);
   
   // General System State
@@ -176,9 +180,32 @@ export default function App() {
   }, [temp, humidity, isConnected, tempThreshold, humidityMinThreshold, rssi]);
 
   // Toggle controls helper
-  const handleToggleLight = () => {
-    const nextState = !relayLight;
-    setRelayLight(nextState);
+  const handleToggleLampu = (id: 1 | 2 | 3 | 4) => {
+    let nextState = false;
+    let name = '';
+    let pin = '';
+    if (id === 1) {
+      nextState = !relayLampu1;
+      setRelayLampu1(nextState);
+      name = 'Lampu 1';
+      pin = 'Pin D5';
+    } else if (id === 2) {
+      nextState = !relayLampu2;
+      setRelayLampu2(nextState);
+      name = 'Lampu 2';
+      pin = 'Pin D6';
+    } else if (id === 3) {
+      nextState = !relayLampu3;
+      setRelayLampu3(nextState);
+      name = 'Lampu 3';
+      pin = 'Pin D7';
+    } else if (id === 4) {
+      nextState = !relayLampu4;
+      setRelayLampu4(nextState);
+      name = 'Lampu 4';
+      pin = 'Pin D8';
+    }
+
     const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
     
     // Add command log
@@ -188,7 +215,7 @@ export default function App() {
         id: Date.now().toString(),
         time: timestamp,
         type: 'CMD',
-        msg: `CMD_SENT RELAY_MAIN_LIGHT -> ${nextState ? 'ON (HIGH)' : 'OFF (LOW)'}`
+        msg: `CMD_SENT SHIELD_RELAY: ${name.toUpperCase()} (${pin}) -> ${nextState ? 'ON (HIGH)' : 'OFF (LOW)'}`
       }
     ]);
   };
@@ -621,84 +648,213 @@ export default function App() {
 
         {/* CARD C: Relay Controls Card (col-span-4 row-span-4) - HIGHLIGHT card style with light background */}
         <div 
-          className="col-span-1 md:col-span-4 md:row-span-4 bg-zinc-50 text-zinc-950 rounded-[2rem] p-7 flex flex-col justify-between shadow-2xl relative overflow-hidden group border border-zinc-300/40"
+          className="col-span-1 md:col-span-4 md:row-span-4 bg-zinc-50 text-zinc-950 rounded-[2rem] p-6 flex flex-col justify-between shadow-2xl relative overflow-hidden group border border-zinc-300/40"
           id="card_controls"
         >
           {/* Ambient overlay representing high-tech circuit grids */}
           <div className="absolute inset-0 bg-[radial-gradient(#e4e4e7_1.2px,transparent_1.2px)] [background-size:16px_16px] opacity-30 pointer-events-none" />
 
           <div>
-            <div className="flex justify-between items-center mb-6 relative z-10">
+            <div className="flex justify-between items-center mb-4 relative z-10">
               <span className="px-2.5 py-1 bg-zinc-950 text-white text-[9px] font-bold rounded-lg uppercase tracking-wider">
-                KONTROL AKTIF
+                KONTROL AKTUATOR
               </span>
               
               {/* Glowing smart bulb indicator */}
               <div className={`w-10 h-10 rounded-full flex items-center justify-center transition-all duration-300 shadow-md ${
-                relayLight 
-                  ? 'bg-amber-400 text-zinc-950 shadow-amber-400/40 scale-110' 
+                (relayLampu1 || relayLampu2 || relayLampu3 || relayLampu4)
+                  ? 'bg-amber-400 text-zinc-950 shadow-amber-400/40 scale-110 animate-pulse' 
                   : 'bg-zinc-300 text-zinc-500'
               }`}>
-                <Power className="w-5 h-5 animate-pulse" />
+                <Lightbulb className="w-5 h-5" />
               </div>
             </div>
 
             <h2 className="text-2xl md:text-3xl font-extrabold leading-tight tracking-tight text-zinc-900">
-              Lampu Ruang Utama
+              Relay Lampu (Ch 1 - 4)
             </h2>
-            <p className="text-zinc-650 text-xs md:text-sm mt-1.5 leading-relaxed font-medium">
-              Tekan tombol sakelar di bawah untuk memicu relay elektromagnetik Arduino/ESP32 secara langsung.
+            <p className="text-zinc-650 text-xs mt-1 leading-relaxed font-semibold">
+              Aktifkan sirkuit relay elektromagnetik untuk Lampu 1 s/d 4 secara real-time.
             </p>
           </div>
 
-          <div className="space-y-4 my-4 z-10">
-            {/* Control Toggle 1: Main Bulb Relay */}
-            <div className="flex items-center justify-between p-3.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-2xl transition-all border border-zinc-300/60">
-              <div className="flex items-center gap-3">
-                <span className={`w-2.5 h-2.5 rounded-full ${relayLight ? 'bg-amber-500 animate-ping' : 'bg-zinc-400'}`} />
+          {/* Quick Master Controls */}
+          <div className="flex items-center gap-2 mt-3 mb-1.5 relative z-10 bg-zinc-200/50 p-1 rounded-xl border border-zinc-350/50">
+            <button
+              onClick={() => {
+                setRelayLampu1(true);
+                setRelayLampu2(true);
+                setRelayLampu3(true);
+                setRelayLampu4(true);
+                const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+                setLogs(prev => [
+                  ...prev,
+                  {
+                    id: Date.now().toString(),
+                    time: timestamp,
+                    type: 'CMD',
+                    msg: `CMD_SENT MASTER_CONTROL -> ALL RELAY LAMPS (1-4) ACTIVATED`
+                  }
+                ]);
+              }}
+              className="flex-1 py-1.5 px-2 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-[9px] uppercase rounded-lg tracking-wider transition-colors duration-200 cursor-pointer text-center"
+              title="Nyalakan semua lampu relays"
+            >
+              Nyalakan Semua
+            </button>
+            <button
+              onClick={() => {
+                setRelayLampu1(false);
+                setRelayLampu2(false);
+                setRelayLampu3(false);
+                setRelayLampu4(false);
+                const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+                setLogs(prev => [
+                  ...prev,
+                  {
+                    id: Date.now().toString(),
+                    time: timestamp,
+                    type: 'CMD',
+                    msg: `CMD_SENT MASTER_CONTROL -> ALL RELAY LAMPS (1-4) DEACTIVATED`
+                  }
+                ]);
+              }}
+              className="flex-1 py-1.5 px-2 bg-red-600 hover:bg-red-700 text-white font-extrabold text-[9px] uppercase rounded-lg tracking-wider transition-colors duration-200 cursor-pointer text-center"
+              title="Matikan semua lampu relays"
+            >
+              Matikan Semua
+            </button>
+          </div>
+
+          <div className="space-y-2 my-2.5 z-10 flex-1 overflow-y-auto pr-1">
+            {/* Control Toggle 1 */}
+            <div className="flex items-center justify-between p-2.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-xl transition-all border border-zinc-300/60">
+              <div className="flex items-center gap-2.5">
+                <span className={`w-2.5 h-2.5 rounded-full ${relayLampu1 ? 'bg-amber-500 animate-pulse' : 'bg-zinc-400'}`} />
                 <div>
-                  <h5 className="font-bold text-xs text-zinc-900 uppercase tracking-tight">Main Relay (D5)</h5>
-                  <p className="text-[10px] text-zinc-650 font-semibold">{relayLight ? 'Status: AKTIF' : 'Status: NONAKTIF'}</p>
+                  <h5 className="font-extrabold text-xs text-zinc-900 uppercase tracking-tight">Lampu 1 (Relay Ch 1)</h5>
+                  <p className="text-[10px] text-zinc-550 font-bold">{relayLampu1 ? 'Status: ON (HIGH)' : 'Status: OFF (LOW)'} | Pin D5</p>
                 </div>
               </div>
 
               <button 
-                onClick={handleToggleLight}
-                className={`w-16 h-8 rounded-full p-1 transition-colors duration-300 cursor-pointer flex items-center relative ${
-                  relayLight ? 'bg-zinc-950' : 'bg-zinc-300'
+                onClick={() => handleToggleLampu(1)}
+                className={`w-14 h-7 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center relative ${
+                  relayLampu1 ? 'bg-zinc-950' : 'bg-zinc-300'
                 }`}
-                title="Toggle Relay Lampu"
+                title="Memicu relay lampu 1"
               >
                 <div 
                   className={`w-6 h-6 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center ${
-                    relayLight ? 'translate-x-8 bg-amber-400 text-zinc-950' : 'translate-x-0 bg-white text-zinc-400'
+                    relayLampu1 ? 'translate-x-7 bg-amber-400 text-zinc-950' : 'translate-x-0 bg-white text-zinc-400'
                   }`}
                 >
-                  <Power className="w-3.5 h-3.5 font-bold" />
+                  <Power className="w-3.5 h-3.5" />
                 </div>
               </button>
             </div>
 
-            {/* Control Toggle 2: Exhaust Fan Relay */}
-            <div className="flex items-center justify-between p-3.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-2xl transition-all border border-zinc-300/60">
-              <div className="flex items-center gap-3">
+            {/* Control Toggle 2 */}
+            <div className="flex items-center justify-between p-2.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-xl transition-all border border-zinc-300/60">
+              <div className="flex items-center gap-2.5">
+                <span className={`w-2.5 h-2.5 rounded-full ${relayLampu2 ? 'bg-amber-500 animate-pulse' : 'bg-zinc-400'}`} />
+                <div>
+                  <h5 className="font-extrabold text-xs text-zinc-900 uppercase tracking-tight">Lampu 2 (Relay Ch 2)</h5>
+                  <p className="text-[10px] text-zinc-550 font-bold">{relayLampu2 ? 'Status: ON (HIGH)' : 'Status: OFF (LOW)'} | Pin D6</p>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => handleToggleLampu(2)}
+                className={`w-14 h-7 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center relative ${
+                  relayLampu2 ? 'bg-zinc-950' : 'bg-zinc-300'
+                }`}
+                title="Memicu relay lampu 2"
+              >
+                <div 
+                  className={`w-6 h-6 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center ${
+                    relayLampu2 ? 'translate-x-7 bg-amber-400 text-zinc-950' : 'translate-x-0 bg-white text-zinc-400'
+                  }`}
+                >
+                  <Power className="w-3.5 h-3.5" />
+                </div>
+              </button>
+            </div>
+
+            {/* Control Toggle 3 */}
+            <div className="flex items-center justify-between p-2.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-xl transition-all border border-zinc-300/60">
+              <div className="flex items-center gap-2.5">
+                <span className={`w-2.5 h-2.5 rounded-full ${relayLampu3 ? 'bg-amber-500 animate-pulse' : 'bg-zinc-400'}`} />
+                <div>
+                  <h5 className="font-extrabold text-xs text-zinc-900 uppercase tracking-tight">Lampu 3 (Relay Ch 3)</h5>
+                  <p className="text-[10px] text-zinc-550 font-bold">{relayLampu3 ? 'Status: ON (HIGH)' : 'Status: OFF (LOW)'} | Pin D7</p>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => handleToggleLampu(3)}
+                className={`w-14 h-7 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center relative ${
+                  relayLampu3 ? 'bg-zinc-950' : 'bg-zinc-300'
+                }`}
+                title="Memicu relay lampu 3"
+              >
+                <div 
+                  className={`w-6 h-6 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center ${
+                    relayLampu3 ? 'translate-x-7 bg-amber-400 text-zinc-950' : 'translate-x-0 bg-white text-zinc-400'
+                  }`}
+                >
+                  <Power className="w-3.5 h-3.5" />
+                </div>
+              </button>
+            </div>
+
+            {/* Control Toggle 4 */}
+            <div className="flex items-center justify-between p-2.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-xl transition-all border border-zinc-300/60">
+              <div className="flex items-center gap-2.5">
+                <span className={`w-2.5 h-2.5 rounded-full ${relayLampu4 ? 'bg-amber-500 animate-pulse' : 'bg-zinc-400'}`} />
+                <div>
+                  <h5 className="font-extrabold text-xs text-zinc-900 uppercase tracking-tight">Lampu 4 (Relay Ch 4)</h5>
+                  <p className="text-[10px] text-zinc-550 font-bold">{relayLampu4 ? 'Status: ON (HIGH)' : 'Status: OFF (LOW)'} | Pin D8</p>
+                </div>
+              </div>
+
+              <button 
+                onClick={() => handleToggleLampu(4)}
+                className={`w-14 h-7 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center relative ${
+                  relayLampu4 ? 'bg-zinc-950' : 'bg-zinc-300'
+                }`}
+                title="Memicu relay lampu 4"
+              >
+                <div 
+                  className={`w-6 h-6 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center ${
+                    relayLampu4 ? 'translate-x-7 bg-amber-400 text-zinc-950' : 'translate-x-0 bg-white text-zinc-400'
+                  }`}
+                >
+                  <Power className="w-3.5 h-3.5" />
+                </div>
+              </button>
+            </div>
+
+            {/* Auxiliary Exhaust Relay Control (Relay Fan) kept for rich controls */}
+            <div className="flex items-center justify-between p-2.5 bg-zinc-200/60 hover:bg-zinc-200/90 rounded-xl transition-all border border-zinc-300/60">
+              <div className="flex items-center gap-2.5">
                 <span className={`w-2.5 h-2.5 rounded-full ${relayFan ? 'bg-blue-500 animate-spin' : 'bg-zinc-400'}`} />
                 <div>
-                  <h5 className="font-bold text-xs text-zinc-900 uppercase tracking-tight">Aux Fan Relay (D6)</h5>
-                  <p className="text-[10px] text-zinc-650 font-semibold">{relayFan ? 'Sirkulasi: BERPUTAR' : 'Sirkulasi: BERHENTI'}</p>
+                  <h5 className="font-extrabold text-xs text-zinc-900 uppercase tracking-tight">Sirkulasi Kipas (Aux Fan)</h5>
+                  <p className="text-[10px] text-zinc-550 font-bold">{relayFan ? 'Status: BERPUTAR' : 'Status: BERHENTI'} | Pin D9</p>
                 </div>
               </div>
 
               <button 
                 onClick={handleToggleFan}
-                className={`w-16 h-8 rounded-full p-1 transition-colors duration-300 cursor-pointer flex items-center relative ${
+                className={`w-14 h-7 rounded-full p-0.5 transition-colors duration-300 cursor-pointer flex items-center relative ${
                   relayFan ? 'bg-zinc-950' : 'bg-zinc-300'
                 }`}
-                title="Toggle Relay Kipas"
+                title="Memicu relay kipas penyejuk"
               >
                 <div 
                   className={`w-6 h-6 rounded-full shadow-md transform transition-transform duration-300 flex items-center justify-center ${
-                    relayFan ? 'translate-x-8 bg-blue-500 text-white' : 'translate-x-0 bg-white text-zinc-400'
+                    relayFan ? 'translate-x-7 bg-blue-550 text-white' : 'translate-x-0 bg-white text-zinc-400'
                   }`}
                 >
                   <RefreshCw className="w-3.5 h-3.5" />
@@ -713,8 +869,8 @@ export default function App() {
               <span>{deviceType}</span>
             </div>
             <div className="flex justify-between font-bold">
-              <span>HARDWARE:</span>
-              <span>ESP8266 / ESP32 SOCKET API</span>
+              <span>SHIELD RELAY:</span>
+              <span>4-CHANNEL COUPLING RELAY</span>
             </div>
           </div>
         </div>
