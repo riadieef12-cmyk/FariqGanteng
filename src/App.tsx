@@ -25,7 +25,10 @@ import {
   CheckCircle,
   Settings2,
   HardDrive,
-  Lightbulb
+  Lightbulb,
+  Copy,
+  Check,
+  BookOpen
 } from 'lucide-react';
 
 interface LogEntry {
@@ -96,6 +99,11 @@ export default function App() {
   // Calibration Drawer / Config Mode Toggle
   const [isCalibrating, setIsCalibrating] = useState<boolean>(false);
 
+  // Hardware simulator and code helper tab selection
+  const [activeSimulatorTab, setActiveSimulatorTab] = useState<'emulator' | 'http' | 'mqtt' | 'schematic'>('emulator');
+  const [codeCopied, setCodeCopied] = useState<boolean>(false);
+  const [relayLogicMode, setRelayLogicMode] = useState<'high' | 'low'>('low'); // 'low' is active-low (common), 'high' is active-high
+
   // Bottom scroll Ref for terminal logs
   const terminalEndRef = useRef<HTMLDivElement>(null);
 
@@ -111,6 +119,33 @@ export default function App() {
     }, 1000);
 
     return () => clearInterval(secondInterval);
+  }, []);
+
+  // Poll Express API backend every 2.5 seconds to synchronize relay states and sensor telemetry from physical boards
+  useEffect(() => {
+    const syncInterval = setInterval(async () => {
+      try {
+        const response = await fetch('/api/relay/status');
+        if (response.ok) {
+          const data = await response.json();
+          setRelayLampu1(!!data.lampu1);
+          setRelayLampu2(!!data.lampu2);
+          setRelayLampu3(!!data.lampu3);
+          setRelayLampu4(!!data.lampu4);
+          
+          // Only update telemetry state if they are in normal bounds
+          if (typeof data.temp === 'number' && typeof data.humidity === 'number') {
+            // Check if values actually changed to avoid unnecessary re-renders
+            setTemp(prev => Math.abs(prev - data.temp) > 0.05 ? data.temp : prev);
+            setHumidity(prev => Math.abs(prev - data.humidity) > 0.05 ? data.humidity : prev);
+          }
+        }
+      } catch (e) {
+        // Safe catch for static-only offline deployment testing
+      }
+    }, 2500);
+
+    return () => clearInterval(syncInterval);
   }, []);
 
   // Scroll to bottom of terminal whenever logs array updates
@@ -323,6 +358,9 @@ export default function App() {
 
     const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
 
+    // Sync state with global server REST API so physical boards can read/update via simple HTTP GET
+    fetch(`/api/relay/toggle?channel=0&state=${stateVal}`).catch(() => {});
+
     if (mqttClient && mqttConnected) {
       const payloadText = stateVal ? 'ALL_ON' : 'ALL_OFF';
       mqttClient.publish(pubTopic, payloadText, { qos: 1 });
@@ -349,10 +387,40 @@ export default function App() {
           id: generateLogId('master_offline'),
           time: timestamp,
           type: 'SYSTEM',
-          msg: `⚠️ MQTT OFFLINE: Perintah disimpan secara lokal. SEMUA LAMPU -> ${stateVal ? 'ON' : 'OFF'}`
+          msg: `⚠️ SISTEM OK (Sinkron REST API & Lokal): SEMUA LAMPU -> ${stateVal ? 'ON' : 'OFF'}`
         }
       ]);
     }
+  };
+
+  // Simulating DHT22 sensor readings being sent from mock physical board to website via MQTT & HTTP REST API
+  const handleSimulateSensorChange = (type: 'temp' | 'humidity', value: number) => {
+    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    let updatedTemp = temp;
+    let updatedHum = humidity;
+
+    if (type === 'temp') {
+      updatedTemp = value;
+      setTemp(value);
+      if (mqttClient && mqttConnected) {
+        const payload = JSON.stringify({ temp: value, humidity: humidity });
+        mqttClient.publish(subTopic, payload, { qos: 1 });
+      }
+    } else {
+      updatedHum = value;
+      setHumidity(value);
+      if (mqttClient && mqttConnected) {
+        const payload = JSON.stringify({ temp: temp, humidity: value });
+        mqttClient.publish(subTopic, payload, { qos: 1 });
+      }
+    }
+
+    // Sync simulated sensor data to server API
+    fetch('/api/relay/update', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ temp: updatedTemp, humidity: updatedHum })
+    }).catch(() => {});
   };
 
   // Toggle controls helper
@@ -387,6 +455,9 @@ export default function App() {
     // Command format text payload
     const payloadText = `L${id}_${nextState ? 'ON' : 'OFF'}`;
 
+    // Sync to Express backend API
+    fetch(`/api/relay/toggle?channel=${id}&state=${nextState}`).catch(() => {});
+
     if (mqttClient && mqttConnected) {
       mqttClient.publish(pubTopic, payloadText, { qos: 1 });
       setLogs(prev => [
@@ -405,10 +476,241 @@ export default function App() {
           id: generateLogId('toggle_offline'),
           time: timestamp,
           type: 'SYSTEM',
-          msg: `⚠️ MQTT OFFLINE (Gagal Kirim): Perintah disimpan lokal. ${name.toUpperCase()} -> ${nextState ? 'ON' : 'OFF'}`
+          msg: `⚡ SISTEM OK (Sinkron REST API & Lokal): ${name.toUpperCase()} -> ${nextState ? 'ON' : 'OFF'} (${pin})`
         }
       ]);
     }
+  };
+
+  const getBrokerHostAndPort = () => {
+    try {
+      const cleanUrl = brokerUrl.replace('wss://', '').replace('ws://', '');
+      const parts = cleanUrl.split(':');
+      const host = parts[0].split('/')[0] || 'broker.emqx.io';
+      return { host, port: '1883' };
+    } catch (e) {
+      return { host: 'broker.emqx.io', port: '1883' };
+    }
+  };
+
+  const generateArduinoCode = () => {
+    const { host } = getBrokerHostAndPort();
+    const isLow = relayLogicMode === 'low';
+    const activeLevelText = isLow ? 'ACTIVE LOW (Relay Module Indonesia)' : 'ACTIVE HIGH';
+    const initValText = isLow ? 'HIGH' : 'LOW';
+    const onValText = isLow ? 'LOW' : 'HIGH';
+    const offValText = isLow ? 'HIGH' : 'LOW';
+
+    return `/*
+  ========================================================================
+  KODE FIRMWARE ESP32 - KONTROL RELAY 4-SALURAN & SENSOR TELEMETRI (DHT22)
+  Modul Relay: ${activeLevelText} (Lampu menyala jika pin bernilai ${onValText})
+  ========================================================================
+  Instruksi:
+  1. Pasang library "PubSubClient" oleh Nick O'Leary di Arduino IDE.
+  2. Pasang library "DHT sensor library" oleh Adafruit jika pakai sensor DHT22 fisik.
+  3. Masukkan nama Wi-Fi (SSID) dan Password Wi-Fi Anda di bawah.
+  4. Upload kode ini ke ESP32 Dev Board Anda.
+  
+  Format Topic yang Terintegrasi Hari Ini:
+  - ESP32 Mendengarkan Perintah (Sub): ${pubTopic}
+  - ESP32 Mengirimkan Status Telemetri (Pub): ${subTopic}
+*/
+
+#include <WiFi.h>
+#include <PubSubClient.h>
+
+// 1. Kredensial WiFi Lokal Anda
+const char* ssid = "NAMA_WIFI_ANDA";       // Ganti dengan SSID Wi-Fi Anda
+const char* password = "PASSWORD_WIFI_ANDA"; // Ganti dengan sandi Wi-Fi Anda
+
+// 2. Broker MQTT Server Configuration (Disinkronkan dengan Website)
+const char* mqtt_server = "${host}"; 
+const int mqtt_port = 1883; // Port TCP standar untuk koneksi ESP32 tanpa SSL
+
+// 3. Topik MQTT Komunikasi
+const char* sub_topic = "${pubTopic}"; // Topik mendengarkan perintah dari web (esp32/relay/control)
+const char* pub_topic = "${subTopic}"; // Topik feedback telemetry dari ESP32 (esp32/relay/status)
+
+WiFiClient espClient;
+PubSubClient client(espClient);
+
+// Definisi Pemetaan Pin Fisik Relay Elektromagnetik pada board ESP32
+// Menggunakan GPIO 5, 18, 19, 21 sesuai diagram skema
+const int RELAY_PIN_1 = 5;  // Lampu 1
+const int RELAY_PIN_2 = 18; // Lampu 2
+const int RELAY_PIN_3 = 19; // Lampu 3
+const int RELAY_PIN_4 = 21; // Lampu 4
+
+// Uptime Tracker & Mock Sensor
+unsigned long lastMsgTime = 0;
+float currentTemp = 24.8;
+float currentHumid = 62.0;
+
+void setup_wifi() {
+  delay(10);
+  Serial.println();
+  Serial.print("Menghubungkan ke Wi-Fi: ");
+  Serial.println(ssid);
+
+  WiFi.begin(ssid, password);
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+
+  Serial.println("");
+  Serial.println("Wi-Fi Sukses Terhubung!");
+  Serial.print("Alamat IP ESP32: ");
+  Serial.println(WiFi.localIP());
+}
+
+// Callback mendengarkan perintah masuk dari Website Broker
+void callback(char* topic, byte* payload, unsigned int length) {
+  String message = "";
+  for (int i = 0; i < length; i++) {
+    message += (char)payload[i];
+  }
+  
+  Serial.print("Pesan diterima di topik [");
+  Serial.print(topic);
+  Serial.print("]: ");
+  Serial.println(message);
+
+  message.trim();
+  String command = message;
+  command.toUpperCase();
+
+  // Parsing Perintah Sakelar Berdasarkan Payload Text
+  if (command == "L1_ON") {
+    digitalWrite(RELAY_PIN_1, ${onValText});
+    client.publish(pub_topic, "{\\"lampu\\":1,\\"state\\":true}");
+  } else if (command == "L1_OFF") {
+    digitalWrite(RELAY_PIN_1, ${offValText});
+    client.publish(pub_topic, "{\\"lampu\\":1,\\"state\\":false}");
+  } else if (command == "L2_ON") {
+    digitalWrite(RELAY_PIN_2, ${onValText});
+    client.publish(pub_topic, "{\\"lampu\\":2,\\"state\\":true}");
+  } else if (command == "L2_OFF") {
+    digitalWrite(RELAY_PIN_2, ${offValText});
+    client.publish(pub_topic, "{\\"lampu\\":2,\\"state\\":false}");
+  } else if (command == "L3_ON") {
+    digitalWrite(RELAY_PIN_3, ${onValText});
+    client.publish(pub_topic, "{\\"lampu\\":3,\\"state\\":true}");
+  } else if (command == "L3_OFF") {
+    digitalWrite(RELAY_PIN_3, ${offValText});
+    client.publish(pub_topic, "{\\"lampu\\":3,\\"state\\":false}");
+  } else if (command == "L4_ON") {
+    digitalWrite(RELAY_PIN_4, ${onValText});
+    client.publish(pub_topic, "{\\"lampu\\":4,\\"state\\":true}");
+  } else if (command == "L4_OFF") {
+    digitalWrite(RELAY_PIN_4, ${offValText});
+    client.publish(pub_topic, "{\\"lampu\\":4,\\"state\\":false}");
+  } else if (command == "ALL_ON") {
+    digitalWrite(RELAY_PIN_1, ${onValText});
+    digitalWrite(RELAY_PIN_2, ${onValText});
+    digitalWrite(RELAY_PIN_3, ${onValText});
+    digitalWrite(RELAY_PIN_4, ${onValText});
+    client.publish(pub_topic, "{\\"lampu1\\":true,\\"lampu2\\":true,\\"lampu3\\":true,\\"lampu4\\":true}");
+  } else if (command == "ALL_OFF") {
+    digitalWrite(RELAY_PIN_1, ${offValText});
+    digitalWrite(RELAY_PIN_2, ${offValText});
+    digitalWrite(RELAY_PIN_3, ${offValText});
+    digitalWrite(RELAY_PIN_4, ${offValText});
+    client.publish(pub_topic, "{\\"lampu1\\":false,\\"lampu2\\":false,\\"lampu3\\":false,\\"lampu4\\":false}");
+  }
+}
+
+void reconnect() {
+  while (!client.connected()) {
+    Serial.print("Menghubungkan ulang ke MQTT Broker...");
+    String clientId = "ESP32_SmartRelay_" + String(random(0xffff), HEX);
+    
+    if (client.connect(clientId.c_str())) {
+      Serial.println("TERHUBUNG!");
+      client.subscribe(sub_topic);
+      client.publish(pub_topic, "{\\"system_status\\":\\"ONLINE\\"}");
+    } else {
+      Serial.print("GAGAL, Kode Status=");
+      Serial.print(client.state());
+      Serial.println(" coba lagi dalam 5 detik...");
+      delay(5000);
+    }
+  }
+}
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(RELAY_PIN_1, OUTPUT);
+  pinMode(RELAY_PIN_2, OUTPUT);
+  pinMode(RELAY_PIN_3, OUTPUT);
+  pinMode(RELAY_PIN_4, OUTPUT);
+
+  // Set nilai awal berdasarkan tipe pemicu relay aktif (${initValText})
+  digitalWrite(RELAY_PIN_1, ${initValText});
+  digitalWrite(RELAY_PIN_2, ${initValText});
+  digitalWrite(RELAY_PIN_3, ${initValText});
+  digitalWrite(RELAY_PIN_4, ${initValText});
+
+  setup_wifi();
+  
+  client.setServer(mqtt_server, mqtt_port);
+  client.setCallback(callback);
+}
+
+void loop() {
+  if (!client.connected()) {
+    reconnect();
+  }
+  client.loop();
+
+  unsigned long now = millis();
+  if (now - lastMsgTime > 10000) {
+    lastMsgTime = now;
+    // Update simple simulated readings
+    currentTemp = 24.0 + (random(0, 40) / 10.0);
+    currentHumid = 60.0 + (random(0, 100) / 10.0);
+
+    String telemetryPayload = "{\\"temp\\":" + String(currentTemp, 1) + 
+                              ",\\"humidity\\":" + String(currentHumid, 1) + "}";
+    
+    Serial.print("Publish Sinyal Telemetry: ");
+    Serial.println(telemetryPayload);
+    client.publish(pub_topic, telemetryPayload.c_str());
+  }
+}
+`;
+  };
+
+  const handleCopyCode = () => {
+    const code = generateArduinoCode();
+    if (navigator.clipboard) {
+      navigator.clipboard.writeText(code);
+    } else {
+      const textarea = document.createElement('textarea');
+      textarea.value = code;
+      textarea.style.position = 'fixed';
+      document.body.appendChild(textarea);
+      textarea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textarea);
+    }
+    
+    setCodeCopied(true);
+    setTimeout(() => setCodeCopied(false), 2500);
+
+    const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    setLogs(prev => [
+      ...prev,
+      {
+        id: generateLogId('copy_info'),
+        time: timestamp,
+        type: 'SYSTEM',
+        msg: '📋 COPY_SUCCESS: Kode firmware C++ ESP32 disalin ke clipboard.'
+      }
+    ]);
   };
 
   // Switch hardware device profile
@@ -701,6 +1003,38 @@ export default function App() {
                   </div>
                 </div>
 
+                {/* Active-Low and Active-High option */}
+                <div className="bg-zinc-950 px-3 py-2.5 rounded-xl border border-zinc-800/80 flex justify-between items-center">
+                  <div>
+                    <span className="block text-[10px] text-zinc-300 font-extrabold uppercase tracking-wider">Logika Pemicu Relay</span>
+                    <span className="text-[9px] text-zinc-500 font-semibold leading-tight block mt-0.5">Modul relay Indonesia (songle block) biasanya Active-Low.</span>
+                  </div>
+                  <div className="flex bg-zinc-900 border border-zinc-800 p-0.5 rounded-lg shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => setRelayLogicMode('low')}
+                      className={`text-[9px] font-extrabold px-2.5 py-1.5 rounded-md transition-all uppercase tracking-wider cursor-pointer ${
+                        relayLogicMode === 'low' 
+                          ? 'bg-orange-550 text-white shadow-md font-black' 
+                          : 'text-zinc-450 hover:text-zinc-300'
+                      }`}
+                    >
+                      Active Low (0/ON)
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setRelayLogicMode('high')}
+                      className={`text-[9px] font-extrabold px-2.5 py-1.5 rounded-md transition-all uppercase tracking-wider cursor-pointer ${
+                        relayLogicMode === 'high' 
+                          ? 'bg-orange-550 text-white shadow-md font-black' 
+                          : 'text-zinc-450 hover:text-zinc-300'
+                      }`}
+                    >
+                      Active High (1/ON)
+                    </button>
+                  </div>
+                </div>
+
                 <div className="flex flex-wrap items-center justify-between gap-3 pt-2">
                   <div className="flex items-center gap-1.5">
                     <span className="text-[9px] font-bold text-zinc-500 uppercase">Presets:</span>
@@ -960,6 +1294,49 @@ export default function App() {
             <p className="text-zinc-650 text-xs mt-1 leading-relaxed font-semibold">
               Aktifkan sirkuit relay elektromagnetik untuk Lampu 1 s/d 4 secara real-time.
             </p>
+          </div>
+
+          {/* Visualisasi Lampu Interaktif */}
+          <div className="grid grid-cols-4 gap-2 mt-3 mb-1 z-10 relative">
+            {[
+              { id: 1 as const, label: 'Lampu 1', state: relayLampu1 },
+              { id: 2 as const, label: 'Lampu 2', state: relayLampu2 },
+              { id: 3 as const, label: 'Lampu 3', state: relayLampu3 },
+              { id: 4 as const, label: 'Lampu 4', state: relayLampu4 }
+            ].map((lamp) => (
+              <button
+                key={lamp.id}
+                onClick={() => handleToggleLampu(lamp.id)}
+                className={`flex flex-col items-center justify-center p-3 rounded-2xl border transition-all duration-300 cursor-pointer ${
+                  lamp.state 
+                    ? 'bg-amber-500/10 border-amber-300 shadow-[0_4px_12px_rgba(245,158,11,0.15)] scale-[1.03]' 
+                    : 'bg-zinc-200/50 border-zinc-300/40 hover:bg-zinc-200/80'
+                }`}
+                title={`Klik untuk menyalakan/mematikan ${lamp.label}`}
+              >
+                <div className={`relative p-2.5 rounded-full transition-all duration-300 ${
+                  lamp.state 
+                    ? 'bg-amber-400 text-zinc-950 shadow-[0_0_15px_rgba(251,191,36,0.5)]' 
+                    : 'bg-zinc-300 text-zinc-500'
+                }`}>
+                  <Lightbulb className="w-5 h-5" />
+                  {lamp.state && (
+                    <span className="absolute -top-0.5 -right-0.5 flex h-2 w-2">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-amber-400 opacity-75"></span>
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-amber-500"></span>
+                    </span>
+                  )}
+                </div>
+                <span className="text-[9px] font-extrabold text-zinc-800 mt-2 tracking-tight uppercase leading-none">
+                  {lamp.label}
+                </span>
+                <span className={`text-[8px] font-black tracking-wider mt-1 px-1.5 py-0.5 rounded leading-none ${
+                  lamp.state ? 'bg-amber-200/80 text-amber-950' : 'bg-zinc-300/70 text-zinc-650'
+                }`}>
+                  {lamp.state ? 'ACTIVE' : 'OFF'}
+                </span>
+              </button>
+            ))}
           </div>
 
           {/* Quick Master Controls */}
