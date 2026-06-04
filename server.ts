@@ -9,82 +9,117 @@ const relayStates = {
   lampu2: false,
   lampu3: false,
   lampu4: false,
-  temp: 24.8,
+  temp: 28.5,
   humidity: 62.0
 };
 
-// Connect Node.js server to MQTT broker to bridge controls and feedback
+// Dynamic MQTT Configuration that synchronizes with the Web Frontend Settings
+const mqttConfig = {
+  brokerUrl: "wss://broker.emqx.io:8084/mqtt",
+  pubTopic: "esp32/relay/control",
+  subTopic: "esp32/relay/status"
+};
+
 let serverMqttClient: mqtt.MqttClient | null = null;
-const MQTT_BROKER = "mqtt://broker.emqx.io:1883";
-const CONTROL_TOPIC = "esp32/relay/control";
-const STATUS_TOPIC = "esp32/relay/status";
 
-try {
-  serverMqttClient = mqtt.connect(MQTT_BROKER, {
-    clientId: `express_server_bridge_${Math.random().toString(16).substring(2, 8)}`,
-    clean: true,
-    connectTimeout: 5000,
-    reconnectPeriod: 4000
-  });
+function initServerMqtt() {
+  if (serverMqttClient) {
+    try {
+      console.log("[MQTT BRIDGE] Stopping existing server connection before reconnecting...");
+      serverMqttClient.end(true);
+    } catch (e) {
+      console.error("[MQTT BRIDGE] Error ending client connection:", e);
+    }
+  }
 
-  serverMqttClient.on("connect", () => {
-    console.log(`[MQTT BRIDGE] Connected to EMQX Broker at ${MQTT_BROKER}`);
-    serverMqttClient?.subscribe(STATUS_TOPIC, (err) => {
-      if (!err) {
-        console.log(`[MQTT BRIDGE] Subscribed to topic: ${STATUS_TOPIC}`);
+  // Determine standard TCP/TLS or WS mapping for node-mqtt reliability
+  let targetUrl = mqttConfig.brokerUrl;
+  if (targetUrl.includes("broker.emqx.io")) {
+    // If using the default broker, use port 1883 TCP which is highly reliable for Node-MQTT
+    targetUrl = "mqtt://broker.emqx.io:1883";
+  }
+
+  console.log(`[MQTT BRIDGE] Re-initiating server bridge connection to: ${targetUrl}`);
+
+  try {
+    serverMqttClient = mqtt.connect(targetUrl, {
+      clientId: `express_server_bridge_${Math.random().toString(16).substring(2, 8)}`,
+      clean: true,
+      connectTimeout: 7500,
+      reconnectPeriod: 4000
+    });
+
+    serverMqttClient.on("connect", () => {
+      console.log(`[MQTT BRIDGE] Server bridge successfully CONNECTED to ${targetUrl}`);
+      
+      // Subscribe to telemetry/status topic so physical board updates can sync server state instantly
+      serverMqttClient?.subscribe(mqttConfig.subTopic, { qos: 1 }, (err) => {
+        if (!err) {
+          console.log(`[MQTT BRIDGE] Subscribed to FEEDBACK topic: ${mqttConfig.subTopic}`);
+        } else {
+          console.error(`[MQTT BRIDGE] Subscription failed to: ${mqttConfig.subTopic}`, err);
+        }
+      });
+    });
+
+    serverMqttClient.on("message", (topic, message) => {
+      try {
+        const payloadStr = message.toString().trim();
+        console.log(`[MQTT BRIDGE] RX Message on [${topic}]: ${payloadStr}`);
+
+        if (payloadStr.startsWith("{")) {
+          const parsed = JSON.parse(payloadStr);
+          
+          // E.g. {"lampu": 1, "state": true}
+          if (parsed.hasOwnProperty("lampu") && parsed.hasOwnProperty("state")) {
+            const ch = Number(parsed.lampu);
+            const val = !!parsed.state;
+            if (ch === 1) relayStates.lampu1 = val;
+            else if (ch === 2) relayStates.lampu2 = val;
+            else if (ch === 3) relayStates.lampu3 = val;
+            else if (ch === 4) relayStates.lampu4 = val;
+          } else {
+            // E.g. {"lampu1": true, "lampu2": false, ...}
+            if (parsed.hasOwnProperty("lampu1")) relayStates.lampu1 = !!parsed.lampu1;
+            if (parsed.hasOwnProperty("lampu2")) relayStates.lampu2 = !!parsed.lampu2;
+            if (parsed.hasOwnProperty("lampu3")) relayStates.lampu3 = !!parsed.lampu3;
+            if (parsed.hasOwnProperty("lampu4")) relayStates.lampu4 = !!parsed.lampu4;
+          }
+
+          // Parse sensor values from hardware telemetry
+          if (typeof parsed.temp === "number") relayStates.temp = parsed.temp;
+          if (typeof parsed.humidity === "number") relayStates.humidity = parsed.humidity;
+        } else {
+          // Plain text command reflection back to state for manual esp32 clients toggling via MQTT
+          const payloadUpper = payloadStr.toUpperCase();
+          if (payloadUpper === 'L1_ON') relayStates.lampu1 = true;
+          if (payloadUpper === 'L1_OFF') relayStates.lampu1 = false;
+          if (payloadUpper === 'L2_ON') relayStates.lampu2 = true;
+          if (payloadUpper === 'L2_OFF') relayStates.lampu2 = false;
+          if (payloadUpper === 'L3_ON') relayStates.lampu3 = true;
+          if (payloadUpper === 'L3_OFF') relayStates.lampu3 = false;
+          if (payloadUpper === 'L4_ON') relayStates.lampu4 = true;
+          if (payloadUpper === 'L4_OFF') relayStates.lampu4 = false;
+        }
+      } catch (err) {
+        console.error("[MQTT BRIDGE] Error parsing received payload:", err);
       }
     });
-  });
 
-  serverMqttClient.on("message", (topic, message) => {
-    try {
-      const payloadStr = message.toString().trim();
-      console.log(`[MQTT BRIDGE] Recv message on topic [${topic}]: ${payloadStr}`);
+    serverMqttClient.on("error", (err) => {
+      console.error("[MQTT BRIDGE] Connection Error:", err);
+    });
 
-      if (payloadStr.startsWith("{")) {
-        const parsed = JSON.parse(payloadStr);
-        
-        // Match {"lampu": 1, "state": true}
-        if (parsed.hasOwnProperty("lampu") && parsed.hasOwnProperty("state")) {
-          const ch = Number(parsed.lampu);
-          const val = !!parsed.state;
-          if (ch === 1) relayStates.lampu1 = val;
-          else if (ch === 2) relayStates.lampu2 = val;
-          else if (ch === 3) relayStates.lampu3 = val;
-          else if (ch === 4) relayStates.lampu4 = val;
-        } else {
-          // Match {"lampu1": true, ...}
-          if (parsed.hasOwnProperty("lampu1")) relayStates.lampu1 = !!parsed.lampu1;
-          if (parsed.hasOwnProperty("lampu2")) relayStates.lampu2 = !!parsed.lampu2;
-          if (parsed.hasOwnProperty("lampu3")) relayStates.lampu3 = !!parsed.lampu3;
-          if (parsed.hasOwnProperty("lampu4")) relayStates.lampu4 = !!parsed.lampu4;
-        }
-
-        // Match sensor telemetri
-        if (typeof parsed.temp === "number") relayStates.temp = parsed.temp;
-        if (typeof parsed.humidity === "number") relayStates.humidity = parsed.humidity;
-      } else {
-        const payloadUpper = payloadStr.toUpperCase();
-        if (payloadUpper === 'L1_ON') relayStates.lampu1 = true;
-        if (payloadUpper === 'L1_OFF') relayStates.lampu1 = false;
-        if (payloadUpper === 'L2_ON') relayStates.lampu2 = true;
-        if (payloadUpper === 'L2_OFF') relayStates.lampu2 = false;
-        if (payloadUpper === 'L3_ON') relayStates.lampu3 = true;
-        if (payloadUpper === 'L3_OFF') relayStates.lampu3 = false;
-        if (payloadUpper === 'L4_ON') relayStates.lampu4 = true;
-        if (payloadUpper === 'L4_OFF') relayStates.lampu4 = false;
-      }
-    } catch (err) {
-      console.error("[MQTT BRIDGE] Error parsing message", err);
-    }
-  });
-
-  serverMqttClient.on("error", (err) => {
-    console.error("[MQTT BRIDGE] MQTT client error:", err);
-  });
-} catch (e) {
-  console.error("[MQTT BRIDGE] Failed to setup MQTT bridge:", e);
+    serverMqttClient.on("close", () => {
+      console.warn("[MQTT BRIDGE] Server MQTT Connection closed.");
+    });
+  } catch (e) {
+    console.error("[MQTT BRIDGE] Connection initialisation exception:", e);
+  }
 }
+
+// Fire up standard backend client connection
+initServerMqtt();
 
 async function startServer() {
   const app = express();
@@ -132,15 +167,19 @@ async function startServer() {
     // Publish to MQTT from server side so if browser MQTT is blocked, the physical boards still get it immediately!
     if (serverMqttClient && serverMqttClient.connected) {
       if (channel === 0) {
-        serverMqttClient.publish(CONTROL_TOPIC, stateVal ? "ALL_ON" : "ALL_OFF", { qos: 1 });
-        serverMqttClient.publish(CONTROL_TOPIC, `L1_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
-        serverMqttClient.publish(CONTROL_TOPIC, `L2_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
-        serverMqttClient.publish(CONTROL_TOPIC, `L3_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
-        serverMqttClient.publish(CONTROL_TOPIC, `L4_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+        console.log(`[MQTT BRIDGE] TX MASTER: ${stateVal ? "ALL_ON" : "ALL_OFF"} to ${mqttConfig.pubTopic}`);
+        serverMqttClient.publish(mqttConfig.pubTopic, stateVal ? "ALL_ON" : "ALL_OFF", { qos: 1 });
+        serverMqttClient.publish(mqttConfig.pubTopic, `L1_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+        serverMqttClient.publish(mqttConfig.pubTopic, `L2_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+        serverMqttClient.publish(mqttConfig.pubTopic, `L3_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
+        serverMqttClient.publish(mqttConfig.pubTopic, `L4_${stateVal ? 'ON' : 'OFF'}`, { qos: 1 });
       } else {
         const payloadText = `L${channel}_${stateVal ? 'ON' : 'OFF'}`;
-        serverMqttClient.publish(CONTROL_TOPIC, payloadText, { qos: 1 });
+        console.log(`[MQTT BRIDGE] TX CMD: ${payloadText} to ${mqttConfig.pubTopic}`);
+        serverMqttClient.publish(mqttConfig.pubTopic, payloadText, { qos: 1 });
       }
+    } else {
+      console.warn("[MQTT BRIDGE] Cannot publish to hardware, serverMqttClient.connected is offline.");
     }
 
     res.json({
@@ -169,12 +208,34 @@ async function startServer() {
     // Push status updates back to MQTT too so physical boards listening to status get refreshed
     if (serverMqttClient && serverMqttClient.connected) {
       const payload = JSON.stringify(relayStates);
-      serverMqttClient.publish(STATUS_TOPIC, payload, { qos: 1, retain: true });
+      serverMqttClient.publish(mqttConfig.subTopic, payload, { qos: 1, retain: true });
     }
 
     res.json({
       success: true,
       relayStates
+    });
+  });
+
+  // REST API 4: Get dyn MQTT configuration values
+  app.get("/api/relay/config", (req, res) => {
+    res.json(mqttConfig);
+  });
+
+  // REST API 5: Synchronize/Update MQTT settings
+  app.post("/api/relay/config", (req, res) => {
+    const { brokerUrl, pubTopic, subTopic } = req.body;
+    if (brokerUrl) mqttConfig.brokerUrl = brokerUrl;
+    if (pubTopic) mqttConfig.pubTopic = pubTopic;
+    if (subTopic) mqttConfig.subTopic = subTopic;
+
+    // Restart client connections
+    initServerMqtt();
+
+    res.json({
+      success: true,
+      message: "Server bridge MQTT updated successfully",
+      mqttConfig
     });
   });
 

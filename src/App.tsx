@@ -60,6 +60,7 @@ export default function App() {
   const [mqttConnected, setMqttConnected] = useState<boolean>(false);
   const [mqttClient, setMqttClient] = useState<mqtt.MqttClient | null>(null);
   const [isSimulatedOutage, setIsSimulatedOutage] = useState<boolean>(false);
+  const [isSimulationEnabled, setIsSimulationEnabled] = useState<boolean>(false);
 
   // Map isConnected to denote whether we are connected to the actual MQTT broker (and not in simulated outage mode)
   const isConnected = mqttConnected && !isSimulatedOutage;
@@ -132,6 +133,33 @@ export default function App() {
     return () => clearInterval(secondInterval);
   }, []);
 
+  // Load initial MQTT configuration from Express server bridge
+  useEffect(() => {
+    const loadMqttConfig = async () => {
+      try {
+        const res = await fetch('/api/relay/config');
+        if (res.ok) {
+          const data = await res.json();
+          if (data.brokerUrl) {
+            setInputBrokerUrl(data.brokerUrl);
+            setBrokerUrl(data.brokerUrl);
+          }
+          if (data.pubTopic) {
+            setInputPubTopic(data.pubTopic);
+            setPubTopic(data.pubTopic);
+          }
+          if (data.subTopic) {
+            setInputSubTopic(data.subTopic);
+            setSubTopic(data.subTopic);
+          }
+        }
+      } catch (e) {
+        // Safe catch for static fallback
+      }
+    };
+    loadMqttConfig();
+  }, []);
+
   // Poll Express API backend every 2.5 seconds to synchronize relay states and sensor telemetry from physical boards
   useEffect(() => {
     const syncInterval = setInterval(async () => {
@@ -149,7 +177,20 @@ export default function App() {
             // Check if values actually changed to avoid unnecessary re-renders
             setTemp(prev => Math.abs(prev - data.temp) > 0.05 ? data.temp : prev);
             setHumidity(prev => Math.abs(prev - data.humidity) > 0.05 ? data.humidity : prev);
+
+            // Fluctuate RSSI slightly on successful active hardware telemetry report
+            setRssi(prev => {
+              const drift = Math.floor((Math.random() - 0.5) * 2);
+              const next = prev + drift;
+              return next > -45 ? -45 : (next < -82 ? -82 : next);
+            });
           }
+
+          // Trigger visual sync dot and time update to show real-time synchronization is successful
+          const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+          setLastSyncTime(timestamp);
+          setSyncTick(true);
+          setTimeout(() => setSyncTick(false), 300);
         }
       } catch (e) {
         // Safe catch for static-only offline deployment testing
@@ -166,8 +207,10 @@ export default function App() {
     }
   }, [logs]);
 
-  // Sensor drift simulation (Real-time updates) - Runs always to keep the visual indicators active
+  // Sensor drift simulation (Real-time updates) - Runs only if manual simulation mode is enabled
   useEffect(() => {
+    if (!isSimulationEnabled) return;
+
     const sensorTicker = setInterval(() => {
       // Small fluctuation
       const tDrift = parseFloat(((Math.random() - 0.5) * 0.3).toFixed(1));
@@ -241,7 +284,7 @@ export default function App() {
     }, 4500);
 
     return () => clearInterval(sensorTicker);
-  }, [temp, humidity, tempThreshold, humidityMinThreshold, rssi]);
+  }, [temp, humidity, tempThreshold, humidityMinThreshold, rssi, isSimulationEnabled]);
 
   // Real-time MQTT Lifecycle hook
   useEffect(() => {
@@ -1175,13 +1218,45 @@ void loop() {
                   </div>
                 </div>
 
+                {/* Mode Simulasi Toggle */}
+                <div className="bg-zinc-950 px-3 py-2.5 rounded-xl border border-zinc-800/80 flex justify-between items-center mt-3">
+                  <div>
+                    <span className="block text-[10px] text-zinc-300 font-extrabold uppercase tracking-wider">Mode Simulasi Sensor</span>
+                    <span className="text-[9px] text-zinc-500 font-semibold leading-tight block mt-0.5">Jika aktif, sensor berfluktuasi otomatis. Matikan agar nilai 100% riil dari DHT11 ESP32.</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setIsSimulationEnabled(!isSimulationEnabled);
+                      const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+                      setLogs(prev => [
+                        ...prev,
+                        {
+                          id: generateLogId('sim_toggle'),
+                          time: timestamp,
+                          type: 'SYSTEM',
+                          msg: `SYSTEM_CFG: Mode simulasi sensor diubah menjadi ${!isSimulationEnabled ? 'AKTIF' : 'NON-AKTIF'}.`
+                        }
+                      ]);
+                    }}
+                    className={`text-[9px] font-extrabold px-3 py-1.5 rounded-lg transition-all uppercase tracking-wider cursor-pointer border ${
+                      isSimulationEnabled 
+                        ? 'bg-orange-500/10 border-orange-500/50 text-orange-400 font-black' 
+                        : 'bg-zinc-900 border-zinc-800 text-zinc-400 hover:border-zinc-700'
+                    }`}
+                  >
+                    {isSimulationEnabled ? 'Aktif (Mock)' : 'Non-Aktif (Riil)'}
+                  </button>
+                </div>
+
                 <div className="flex items-center gap-2 pt-1">
                   <button 
                     onClick={() => {
-                      setTemp(24.8);
+                      setTemp(28.5);
                       setHumidity(62.0);
                       setTempThreshold(29.5);
                       setHumidityMinThreshold(45.0);
+                      setIsSimulationEnabled(false);
                       
                       const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
                       setLogs(prev => [
@@ -1321,10 +1396,39 @@ void loop() {
 
                   <button
                     type="button"
-                    onClick={() => {
+                    onClick={async () => {
                       setBrokerUrl(inputBrokerUrl);
                       setPubTopic(inputPubTopic);
                       setSubTopic(inputSubTopic);
+
+                      // Sync custom credentials live to back-end node bridge
+                      try {
+                        const response = await fetch('/api/relay/config', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            brokerUrl: inputBrokerUrl,
+                            pubTopic: inputPubTopic,
+                            subTopic: inputSubTopic
+                          })
+                        });
+
+                        const timestamp = new Date().toLocaleTimeString('id-ID', { hour12: false });
+                        
+                        if (response.ok) {
+                          setLogs(prev => [
+                            ...prev,
+                            {
+                              id: generateLogId('bridge_updated'),
+                              time: timestamp,
+                              type: 'SYSTEM',
+                              msg: `🔄 BRIDGE OK: Konfigurasi broker & topik berhasil disinkronkan ke server backend.`
+                            }
+                          ]);
+                        }
+                      } catch (e) {
+                        console.error("Failed to post configuration to backend", e);
+                      }
                     }}
                     className="bg-emerald-600 hover:bg-emerald-700 text-white text-[10px] uppercase tracking-wider px-3.5 py-1.5 font-bold rounded-xl cursor-pointer transition-colors active:scale-95 flex items-center gap-1.5"
                   >
